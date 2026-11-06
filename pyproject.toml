@@ -1,0 +1,10 @@
+[project]
+name = "algotrading-harness"
+version = "0.1.0"
+description = "Backtest-first algorithmic trading harness with a protected risk layer"
+readme = "README.md"
+authors = [
+    { name = "David Zhao" }
+]
+requires-python = ">=3.12"
+dependencies = []
