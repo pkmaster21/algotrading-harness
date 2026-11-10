@@ -1,0 +1,2 @@
+slippage_bps: 5.0          # per side; 5 bps = 0.05%
+commission_per_order: 0.0  # dollars

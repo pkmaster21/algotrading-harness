@@ -1,0 +1,4 @@
+data_start: 2015-01-01
+in_sample_end: 2026-03-31
+holdout_start: 2026-04-01  # must be the day after in_sample_end
+holdout_end: null          # null = latest completed session; set a date to pin a holdout run
