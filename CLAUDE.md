@@ -11,6 +11,7 @@ Strategies are pluggable modules; the harness owns everything else.
 | What a future slice adds     | `ARCHITECTURE.md` → Slice roadmap          |
 | Which file owns what         | `ARCHITECTURE.md` → Components             |
 | Unresolved decisions         | `ARCHITECTURE.md` → Open questions         |
+| UI principles and contract   | `docs/ui-design.md`                        |
 | Results of a past backtest   | `backtests/<run>/summary.json` (see below) |
 
 Read `ARCHITECTURE.md` when planning a new slice or changing the harness,
@@ -46,7 +47,12 @@ Python 3.12, uv, pytest, pandas, pydantic, pyyaml, alpaca-py.
 ```
 harness/      # engine, models, data, construction, costs, broker adapters (locked after slice 1)
 strategies/   # strategy modules only; one file per strategy
-config/       # YAML: universe, dates, costs, construction
+config/       # YAML, read only by harness/config.py
+  strategies/ #   strategy presets (params, rule templates); UI-editable
+  risk/       #   risk presets (conservative, balanced, aggressive)
+  universe/   #   symbol lists
+  *.yaml      #   fixed settings: costs, construction, dates, data (not UI-editable)
+docs/         # detail docs (ui-design.md); entry-point docs stay at the root
 tests/        # pytest; test strategies (buy-and-hold, look-ahead cheater) live here
 data/         # local bar cache (gitignored)
 backtests/    # run outputs (gitignored)
@@ -56,9 +62,12 @@ backtests/    # run outputs (gitignored)
 
 - Type hints everywhere; pydantic models for anything crossing a module boundary.
 - Config values (costs, dates, limits) live in `config/`, never hardcoded.
-- Every backtest run writes a reproducible snapshot: config, strategy name, data range, results.
-- Never commit to `main`. Work on a feature branch, commit after each completed step,
-  and open a pull request for review. Use Conventional Commits (`feat:`, `fix:`, `test:`, ...).
+- Every backtest run writes a reproducible snapshot: the resolved recipe (all config values
+  used, not just preset names), strategy name, data range, results.
+- Never commit to `main`. Work on a feature branch and open a pull request for review.
+  Each PR has exactly one commit: squash work-in-progress commits before opening, and
+  amend (then force-push the feature branch) when addressing review feedback.
+  Use Conventional Commits (`feat:`, `fix:`, `test:`, ...).
 
 ## Pull requests
 
@@ -76,8 +85,8 @@ backtests/    # run outputs (gitignored)
 
 ## Reading backtest output (cheapest first)
 
-1. `backtests/index.csv`: one line per run (timestamp, strategy, date range,
-   holdout flag, total return, max drawdown, trade count, run folder).
+1. `backtests/index.csv`: one line per run (timestamp, strategy, strategy preset,
+   risk preset, date range, holdout flag, total return, max drawdown, trade count, run folder).
    The engine appends to it after every run.
 2. `backtests/<run>/summary.json`: full metrics for one run.
 3. `backtests/<run>/trades.csv` or `equity.csv`: only to investigate specific
