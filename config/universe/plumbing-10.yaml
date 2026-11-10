@@ -1,0 +1,3 @@
+# Temporary plumbing universe: 10 names, survivorship-biased (see ARCHITECTURE.md).
+# The data loader and engine are built for 500+ symbols.
+symbols: [SPY, QQQ, AAPL, MSFT, NVDA, AMZN, GOOGL, META, JPM, XOM]
