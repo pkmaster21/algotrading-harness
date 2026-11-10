@@ -1,0 +1,8 @@
+cache_dir: data/bars                  # one Parquet file per symbol
+holdout_log: backtests/holdout_log.csv
+feed: sip                             # fixed; IEX-only OHLC is not the consolidated open
+adjustment: all                       # splits and dividends
+batch_size: 50                        # symbols per request
+max_requests_per_minute: 180          # Alpaca free plan allows 200
+overlap_bars: 5                       # cached bars re-fetched to detect re-adjustment
+full_refresh_days: 30                 # refetch a symbol's full history at least this often

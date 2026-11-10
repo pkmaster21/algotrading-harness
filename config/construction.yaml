@@ -1,0 +1,2 @@
+max_positions: 5           # equal weight: each new position targets equity / max_positions
+max_missing_sessions: 5    # force-close a held symbol after this many consecutive sessions with no bar
