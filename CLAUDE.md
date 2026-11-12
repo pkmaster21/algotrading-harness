@@ -47,9 +47,9 @@ Python 3.12, uv, pytest, pandas, pydantic, pyyaml, alpaca-py. Dev checks: ruff, 
 
 ```
 harness/      # engine, models, data, construction, costs, broker adapters (locked after slice 1)
-strategies/   # strategy modules only; one file per strategy
+strategies/   # strategy modules only; one file per strategy (gitignored except base + example)
 config/       # YAML, read only by harness/config.py
-  strategies/ #   strategy presets (params, rule templates); UI-editable
+  strategies/ #   strategy presets (params, rule templates); UI-editable; gitignored except example
   risk/       #   risk presets (conservative, balanced, aggressive)
   universe/   #   symbol lists
   *.yaml      #   fixed settings: costs, construction, dates, data (not UI-editable)

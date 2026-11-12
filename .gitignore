@@ -16,3 +16,10 @@ __pycache__/
 # OS / editor
 .DS_Store
 .vscode/
+# Strategies: only the base class and example are tracked
+strategies/*
+!strategies/__init__.py
+!strategies/base.py
+!strategies/example_buy_and_hold.py
+config/strategies/*
+!config/strategies/example_buy_and_hold.yaml

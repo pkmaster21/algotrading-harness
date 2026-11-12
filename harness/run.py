@@ -16,8 +16,10 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime as dt
+import hashlib
 import importlib
 import importlib.util
+import inspect
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -138,6 +140,14 @@ def build_strategy(recipe: Recipe) -> Strategy:
         ) from exc
 
 
+def strategy_source_hash(strategy: Strategy) -> str:
+    """sha256 of the strategy's module file, so a run records exactly which code ran."""
+    source = inspect.getsourcefile(type(strategy))
+    if source is None:
+        raise StrategyLoadError(f"cannot locate source for {type(strategy).__qualname__}")
+    return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+
+
 # --------------------------------------------------------------------------- running
 
 
@@ -212,6 +222,9 @@ def run_backtest(
         "timestamp_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "strategy": result.strategy,
         "strategy_class": f"{type(strategy).__module__}.{type(strategy).__qualname__}",
+        # Strategies are gitignored (except the example), so the git commit alone does not
+        # identify the code that ran; this hash does.
+        "strategy_source_sha256": strategy_source_hash(strategy),
         "git_commit": commit,
         "python": sys.version.split()[0],
     }
