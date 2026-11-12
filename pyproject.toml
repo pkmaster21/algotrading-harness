@@ -19,6 +19,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pandas-stubs>=3.1.0.261029",
+    "pyright>=1.1.414",
     "pytest>=9.2.0",
     "ruff>=0.17.4",
 ]
@@ -34,3 +36,10 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.pyright]
+include = ["harness", "strategies", "tests"]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"

@@ -13,6 +13,7 @@
 ## Testing
 
 - [ ] `uv run pytest` passes
+- [ ] `uv run ruff check harness strategies tests` and `uv run pyright` pass (CI runs both)
 - [ ] Self-reviewed the full diff for accidental changes
 <!-- New or changed tests, and anything not tested. -->
 
