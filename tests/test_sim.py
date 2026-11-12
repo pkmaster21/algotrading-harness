@@ -12,7 +12,7 @@ from harness.broker.base import LookAheadError
 from harness.broker.sim import SimBroker
 from harness.config import CostConfig
 from harness.engine import simulate
-from harness.models import Leg, Order, Stock
+from harness.models import Action, Leg, Order, Side, Stock
 from tests.fixture_strategies import Churn
 from tests.synthetic import COSTS, construction, make_panel, price_lookup
 
@@ -20,8 +20,8 @@ SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"]
 D0, D1, D2 = dt.date(2024, 1, 2), dt.date(2024, 1, 3), dt.date(2024, 1, 4)
 
 
-def _order(symbol: str, side: str, qty: int, created_on: dt.date = D0) -> Order:
-    action = "enter" if side == "buy" else "exit"
+def _order(symbol: str, side: Side, qty: int, created_on: dt.date = D0) -> Order:
+    action: Action = "enter" if side == "buy" else "exit"
     return Order(
         created_on=created_on,
         action=action,

@@ -12,7 +12,7 @@ with base = 50 + 10 * symbol_index (or a custom per-symbol path).
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -44,8 +44,8 @@ def make_panel(
     symbols: Sequence[str],
     n: int,
     *,
-    opens: dict[str, Sequence[float]] | None = None,
-    closes: dict[str, Sequence[float]] | None = None,
+    opens: Mapping[str, Sequence[float] | np.ndarray] | None = None,
+    closes: Mapping[str, Sequence[float] | np.ndarray] | None = None,
     missing: dict[str, Sequence[int]] | None = None,
     start: dt.date = dt.date(2024, 1, 2),
 ) -> BarPanel:

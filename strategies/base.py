@@ -23,10 +23,17 @@ from harness.view import MarketView
 
 
 class Strategy(ABC):
-    """Base class for strategies. Subclasses override `Params` and implement `on_bar`."""
+    """Base class for strategies. Subclasses implement `on_bar` and, if they take
+    parameters, declare them as::
+
+        class Params(Strategy.Params):
+            lookback: int = Field(default=20, ge=2)
+
+        params: Params  # so type checkers know self.params.lookback
+    """
 
     class Params(FrozenModel):
-        """No parameters. Subclasses replace this with their own frozen model."""
+        """No parameters. Subclasses override it with a subclass of `Strategy.Params`."""
 
     #: Name used in reports. Defaults to the module name (e.g. "example_buy_and_hold").
     name: ClassVar[str] = ""

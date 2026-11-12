@@ -1,0 +1,4 @@
+strategy: example_buy_and_hold
+params:
+  symbol: SPY
+  min_history: 1

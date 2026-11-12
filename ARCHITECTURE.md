@@ -233,8 +233,10 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   whole-share counts and any price-level rule (for example "price > $5") are slightly off
   historically. Fine for slice 1; revisit before strategies that filter on price level
   (raw prices plus a separate adjustment factor would fix it).
-- Alpaca stock bars likely start around 2016-01, so the 2015-01-01 data start may be
-  2016 in practice. Confirm on first download.
+- Alpaca stock bars start on 2016-01-04 (confirmed on the first download, 2026-11-12), so
+  the 2015-01-01 data start gives 2016 onward. Keep 2015 in config (the loader records
+  the requested range, so it does not refetch the empty year), or move it to 2016-01-01
+  to make the real start explicit.
 - Forced close at last close is optimistic for bankruptcies (the price collapses after
   delisting) but roughly right for acquisitions. Matters once the universe includes
   delisted names.

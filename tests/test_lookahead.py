@@ -158,6 +158,7 @@ def test_today_bar_is_the_last_visible_bar() -> None:
     class Peek(Strategy):
         def on_bar(self, view, portfolio):  # type: ignore[no-untyped-def]
             bar = view.bar("AAPL")
+            assert bar is not None
             seen.append((view.today, bar.date, bar.close, view.series("AAPL", "close", 1).iloc[-1]))
             return []
 

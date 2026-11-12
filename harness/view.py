@@ -56,7 +56,7 @@ class BarBuffer:
     def symbols(self) -> tuple[str, ...]:
         return self._symbols
 
-    def append(self, session: dt.date, row: Mapping[PriceField, np.ndarray]) -> None:
+    def append(self, session: dt.date, row: Mapping[str, np.ndarray]) -> None:
         """Copy in the bars for `session`, which must be later than the last appended one."""
         if self._length == len(self._stamps):
             raise IndexError("BarBuffer is full")
@@ -146,4 +146,4 @@ class MarketView:
 
     def series(self, symbol: str, field: PriceField, lookback: int) -> pd.Series:
         """`history` for one symbol, as a Series."""
-        return self.history(field, lookback, [symbol])[symbol]
+        return self.history(field, lookback, [symbol]).iloc[:, 0].rename(symbol)
