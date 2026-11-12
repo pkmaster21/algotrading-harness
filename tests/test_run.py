@@ -214,3 +214,17 @@ def test_harness_bugs_keep_their_traceback(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(run_module, "load_recipe", boom)
     with pytest.raises(HoldoutViolation):
         main(["--strategy", "example_buy_and_hold"])
+
+
+def test_snapshot_records_strategy_source_hash(tmp_path: Path) -> None:
+    import hashlib
+
+    import yaml
+
+    import strategies.example_buy_and_hold as module
+
+    config = tmp_config(tmp_path)
+    summary = _run(config)
+    snap = yaml.safe_load((Path(summary["run_dir"]) / "config_snapshot.yaml").read_text())
+    expected = hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+    assert snap["run"]["strategy_source_sha256"] == expected
