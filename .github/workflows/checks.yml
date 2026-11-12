@@ -1,0 +1,41 @@
+# Tests, lint, format, and type checks on every pull request and every push to main.
+# No secrets: the tests use synthetic data and a fake fetcher, never the Alpaca API.
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install (exactly as locked)
+        run: uv sync --locked
+
+      - name: Tests
+        run: uv run pytest
+
+      - name: Lint
+        run: uv run ruff check harness strategies tests
+
+      - name: Format
+        run: uv run ruff format --check harness strategies tests
+
+      - name: Types
+        run: uv run pyright

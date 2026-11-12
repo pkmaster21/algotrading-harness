@@ -40,7 +40,8 @@ not for routine strategy work.
 
 ## Stack
 
-Python 3.12, uv, pytest, pandas, pydantic, pyyaml, alpaca-py.
+Python 3.12, uv, pytest, pandas, pydantic, pyyaml, alpaca-py. Dev checks: ruff, pyright
+(with pandas-stubs, matching what Pylance reports in the editor).
 
 ## Layout
 
@@ -76,8 +77,9 @@ backtests/    # run outputs (gitignored)
 - **Description:** fill in `.github/pull_request_template.md` (why, what, how to review,
   testing, risks). Say why the change is needed, not just what changed.
 - **Guide the reviewer:** list the files to read first and the kind of feedback wanted.
-- **Self-review first:** read the full diff for accidental changes, and run `uv run pytest`
-  before opening the PR. Note any test that was skipped or not run.
+- **Self-review first:** read the full diff for accidental changes, and run `uv run pytest`,
+  `uv run ruff check harness strategies tests`, and `uv run pyright` before opening the PR
+  (CI runs the same checks). Note any test that was skipped or not run.
 - **Flag sensitive changes:** call out anything touching dependencies, `harness/`
   boundaries, data or holdout handling, credentials, or `.claude/settings.json`.
 - **Link** the related issue if there is one.
