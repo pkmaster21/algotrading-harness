@@ -39,7 +39,7 @@ from harness.models import (
     Signal,
     Stock,
 )
-from harness.view import PRICE_FIELDS, BarBuffer, PriceField
+from harness.view import PRICE_FIELDS, BarBuffer
 from strategies.base import Strategy
 
 
@@ -68,6 +68,7 @@ class BacktestResult(FrozenModel):
     updates: tuple[OrderUpdate, ...]
     events: tuple[EngineEvent, ...]
     final_positions: dict[str, Position]
+    final_marks: dict[str, float]  # last close used to value each final position
     data_fingerprint: str
 
     @property
@@ -111,7 +112,7 @@ class Engine:
         self._collect_updates(session)
 
     def on_session_close(
-        self, session: dt.date, row: Mapping[PriceField, np.ndarray], trade: bool = True
+        self, session: dt.date, row: Mapping[str, np.ndarray], trade: bool = True
     ) -> None:
         """Process the close of `session`. With `trade=False` (warm-up) the bars are added
         to the view but the strategy is not called and no equity point is recorded."""
@@ -133,6 +134,10 @@ class Engine:
         """Cancel orders that can no longer fill because the data ended."""
         self.broker.cancel_all("end_of_data")
         self._collect_updates(session)
+
+    def last_close(self, symbol: str) -> float:
+        """The most recent close seen for `symbol` (what positions are marked at)."""
+        return self._last_close[symbol]
 
     # ------------------------------------------------------------------ helpers
 
@@ -275,5 +280,6 @@ def simulate(
         updates=tuple(engine.updates),
         events=tuple(engine.events),
         final_positions=dict(broker.account().positions),
+        final_marks={s: engine.last_close(s) for s in broker.account().positions},
         data_fingerprint=panel.fingerprint(),
     )

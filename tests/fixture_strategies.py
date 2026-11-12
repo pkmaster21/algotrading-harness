@@ -18,11 +18,13 @@ class BuyAndHold(Strategy):
 
     name = "test_buy_and_hold"
 
-    class Params(FrozenModel):
+    class Params(Strategy.Params):
         symbol: str = "SPY"
 
+    params: Params
+
     def on_bar(self, view: MarketView, portfolio: PortfolioSnapshot) -> Sequence[Signal]:
-        symbol = self.params.symbol  # type: ignore[attr-defined]
+        symbol = self.params.symbol
         if portfolio.positions:
             return []
         return [Signal.enter(symbol, strength=1.0, reason="first bar")]

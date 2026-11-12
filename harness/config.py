@@ -115,6 +115,8 @@ class BacktestConfig(FrozenModel):
     # Annual rate as a decimal (0.04 = 4%), used for Sharpe. The bounds catch percent typos.
     risk_free_rate: float = Field(ge=-0.05, le=0.20)
     benchmark: str
+    # Run folders and backtests/index.csv; a relative path resolves like the data paths.
+    output_dir: Path
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -153,7 +155,8 @@ class Recipe(FrozenModel):
 
 
 _FIXED_SECTIONS = ("dates", "costs", "construction", "backtest", "data")
-_DATA_PATHS = ("cache_dir", "holdout_log")
+# Paths resolved against the project root, per section.
+_PATH_FIELDS = {"data": ("cache_dir", "holdout_log"), "backtest": ("output_dir",)}
 
 # config/ sits at the project root, next to harness/.
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -183,9 +186,9 @@ def _read_preset(config_dir: Path, kind: str, name: str) -> dict[str, Any]:
     return {"name": name, **raw}
 
 
-def _resolve_data_paths(data: dict[str, Any], root: Path) -> dict[str, Any]:
-    resolved = dict(data)
-    for key in _DATA_PATHS:
+def _resolve_paths(section: dict[str, Any], keys: tuple[str, ...], root: Path) -> dict[str, Any]:
+    resolved = dict(section)
+    for key in keys:
         value = resolved.get(key)
         if isinstance(value, str) and not Path(value).is_absolute():
             resolved[key] = str(root / value)
@@ -195,7 +198,8 @@ def _resolve_data_paths(data: dict[str, Any], root: Path) -> dict[str, Any]:
 def load_recipe(strategy: str, universe: str, config_dir: Path = DEFAULT_CONFIG_DIR) -> Recipe:
     """Resolve the named presets and the fixed settings in `config_dir` into one Recipe.
 
-    Relative data paths come back absolute, resolved against `config_dir`'s parent.
+    Relative paths (data cache, holdout log, run outputs) come back absolute, resolved
+    against `config_dir`'s parent.
     Raises ConfigError naming the offending file on any missing file, malformed YAML,
     bad preset name, or invalid value.
     """
@@ -206,7 +210,8 @@ def load_recipe(strategy: str, universe: str, config_dir: Path = DEFAULT_CONFIG_
     }
     for section in _FIXED_SECTIONS:
         raw[section] = _read_yaml(config_dir / f"{section}.yaml")
-    raw["data"] = _resolve_data_paths(raw["data"], config_dir.parent)
+    for section, keys in _PATH_FIELDS.items():
+        raw[section] = _resolve_paths(raw[section], keys, config_dir.parent)
     try:
         return Recipe.model_validate(raw)
     except ValidationError as exc:

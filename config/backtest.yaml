@@ -1,3 +1,4 @@
 starting_cash: 10000.0
 risk_free_rate: 0.0        # annual, for Sharpe
 benchmark: SPY             # buy-and-hold comparison in every report
+output_dir: backtests        # run folders and index.csv
