@@ -121,3 +121,42 @@ def test_holdout_run_trades_from_holdout_start_with_warmup_and_is_logged(tmp_pat
     assert row["run_id"] == Path(summary["run_dir"]).name
     index = (recipe(config).backtest.output_dir / "index.csv").read_text().splitlines()
     assert index[1].split(",")[6] == "True"
+
+
+def test_holdout_log_run_id_is_the_run_folder_even_when_runs_share_a_second(
+    tmp_path: Path,
+) -> None:
+    config = tmp_config(tmp_path)
+    fetcher = FakeFetcher()
+    folders = [
+        Path(
+            run_backtest(
+                recipe(config),
+                holdout=True,
+                loader=_loader(config, fetcher),
+                now=lambda: NOW,
+                git_commit=lambda: None,
+            )["run_dir"]  # fmt: skip
+        ).name
+        for _ in range(2)
+    ]
+    assert folders[1] == folders[0] + "-2"
+    logged = [row["run_id"] for row in read_holdout_log(recipe(config).data.holdout_log)]
+    assert logged == folders
+
+
+def test_holdout_benchmark_covers_the_same_window_as_the_strategy(tmp_path: Path) -> None:
+    # With one slot, the example strategy (buy SPY, hold) is the benchmark, so every metric
+    # matches, but only if the benchmark also starts with fresh capital at the holdout start.
+    config = tmp_config(tmp_path)
+    construction = config / "construction.yaml"
+    construction.write_text(
+        construction.read_text().replace("max_positions: 5", "max_positions: 1")
+    )
+    summary = run_backtest(recipe(config), holdout=True, loader=_loader(config, FakeFetcher()),
+                           now=lambda: NOW, git_commit=lambda: None)  # fmt: skip
+    assert summary["start"] == "2026-04-01"
+    assert summary["trade_count"] == 1
+    for key in ("total_return", "cagr", "max_drawdown", "sharpe"):
+        assert summary[key] is not None
+        assert summary[key] == summary["benchmark"][key], key

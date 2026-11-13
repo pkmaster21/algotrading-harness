@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,10 +54,67 @@ def _run(config: Path, **kw):  # type: ignore[no-untyped-def]
         "data = open('data/bars/SPY.parquet').read()",
         "exec('import os')",
         "__import__('os')",
+        # File and network I/O through the allowed numeric libraries.
+        "import pandas as pd\nx = pd.read_parquet('data/bars/SPY.parquet')",
+        "import pandas as pd\nx = pd.read_csv('.env', header=None)",
+        "import pandas as pd\nx = pd.read_csv('https://example.com/x.csv')",
+        "import pandas as pd\nx = pd.read_pickle('x.pkl')",
+        "import pandas as pd\npd.DataFrame().to_parquet('data/bars/SPY.parquet')",
+        "import pandas as pd\npd.DataFrame().to_csv('x.csv')",
+        "import pandas as pd\npd.DataFrame().to_pickle('x.pkl')",
+        "import numpy as np\na = np.load('x.npy')",
+        "import numpy as np\na = np.loadtxt('x.txt')",
+        "import numpy as np\na = np.fromfile('x.bin')",
+        "import numpy as np\na = np.memmap('x.bin')",
+        "import numpy as np\nnp.save('x.npy', np.zeros(1))",
+        "import numpy as np\nnp.savetxt('x.txt', np.zeros(1))",
+        "import numpy as np\nnp.savez('x.npz', np.zeros(1))",
+        "import numpy as np\nnp.savez_compressed('x.npz', np.zeros(1))",
+        "import numpy as np\nnp.zeros(1).tofile('x.bin')",
+        "from numpy import loadtxt",
+        "from pandas import read_csv as rc",
+        "from pandas import *",
+        "import pandas as pd\nreader = pd.read_csv",  # aliasing, not only calls
+        # Routes to builtins, sys, os, and environment-reading settings.
+        "o = open\nx = o('.env').read()",
+        "x = __builtins__['open']('.env').read()",
+        "from statistics import sys",
+        "import typing\nd = typing.sys.modules['harness.data']",
+        "import pandas as pd\ne = pd.io.common.os.environ",
+        "from pydantic.v1 import BaseSettings",
+        "import pydantic.v1",
+        "from pydantic import v1",
+        "import pydantic\nS = pydantic.v1.BaseSettings",
+        "import pydantic as p\nS = p.v1.BaseSettings",
     ],
 )
 def test_disallowed_strategy_code_is_rejected(source: str) -> None:
     assert check_strategy_source(source)
+
+
+def test_ordinary_numeric_code_is_not_mistaken_for_io() -> None:
+    source = "\n".join(
+        [
+            "import numpy as np",
+            "import pandas as pd",
+            "from pydantic import Field",
+            "def f(view, self):",
+            "    closes = view.history('close', self.params.lookback)",
+            "    a = closes.to_numpy(); b = closes.iloc[-1].to_dict(); c = closes.index.to_list()",
+            "    d = pd.to_datetime(closes.index); e = pd.to_numeric(closes.iloc[:, 0])",
+            "    f = closes.rolling(5).mean().loc[closes.index[-1]]",
+            "    g = np.log(closes).diff().std(); v1 = 3; opened = True; system = 'x'",
+            "    self.loaded = True; self.save_state = g; h = self.params.load_factor",
+            "    return a, b, c, d, e, f, g, h, v1, opened, system, closes.to_frame()",
+        ]
+    )
+    assert check_strategy_source(source) == []
+
+
+def test_problem_message_names_the_line_and_the_attribute() -> None:
+    (problem,) = check_strategy_source("import pandas as pd\n\nx = pd.read_csv('a.csv')")
+    assert problem.startswith("line 3:")
+    assert "read_csv" in problem
 
 
 def test_allowed_strategy_imports_pass() -> None:
@@ -87,6 +145,58 @@ def test_loader_finds_the_one_strategy_class() -> None:
     assert load_strategy_class("example_buy_and_hold") is ExampleBuyAndHold
     with pytest.raises(StrategyLoadError, match="no strategy module"):
         load_strategy_class("does_not_exist")
+
+
+@pytest.fixture
+def strategy_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    """Write throwaway strategy modules into a temporary package outside the repo."""
+    package = f"tmp_strategies_{tmp_path.name.replace('-', '_')}"
+    (tmp_path / package).mkdir()
+    (tmp_path / package / "__init__.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def write(name: str, source: str) -> str:
+        (tmp_path / package / f"{name}.py").write_text(source)
+        return package
+
+    yield write
+    for mod in [m for m in sys.modules if m == package or m.startswith(package + ".")]:
+        del sys.modules[mod]
+
+
+_LOOSE_PARAMS = """
+from pydantic import BaseModel
+from strategies.base import Strategy
+
+class Loose(Strategy):
+    class Params(BaseModel):  # not a Strategy.Params: typos in presets would pass silently
+        lookback: int = 20
+
+    def on_bar(self, view, portfolio):
+        return []
+"""
+
+
+def test_params_class_must_subclass_strategy_params(strategy_package) -> None:  # type: ignore[no-untyped-def]
+    package = strategy_package("loose", _LOOSE_PARAMS)
+    with pytest.raises(StrategyLoadError, match="Strategy.Params"):
+        load_strategy_class("loose", package=package)
+
+
+def test_strategy_with_foreign_params_class_cannot_be_constructed() -> None:
+    from pydantic import BaseModel
+
+    from strategies.base import Strategy
+
+    class Loose(Strategy):
+        class Params(BaseModel):  # type: ignore[assignment]
+            lookback: int = 20
+
+        def on_bar(self, view, portfolio):  # type: ignore[no-untyped-def]
+            return []
+
+    with pytest.raises(TypeError, match="Strategy.Params"):
+        Loose.from_params({"lookbak": 5})  # the typo must not be accepted silently
 
 
 def test_bad_params_fail_before_any_data_is_loaded(tmp_path: Path) -> None:
@@ -202,6 +312,19 @@ def test_holdout_run_without_holdout_sessions_is_a_clear_error(tmp_path: Path) -
     with pytest.raises(HoldoutUnavailable):
         run_backtest(r, holdout=True, loader=loader, now=lambda: before_holdout,
                      git_commit=lambda: None)  # fmt: skip
+
+
+def test_failed_run_leaves_no_run_folder_behind(tmp_path: Path) -> None:
+    from harness.run import HoldoutUnavailable
+
+    config = tmp_config(tmp_path)
+    before_holdout = dt.datetime(2026, 3, 20, 15, 0, tzinfo=dt.UTC)
+    r = recipe(config)
+    loader = DataLoader(r.dates, r.data, fetcher_factory=FakeFetcher, now=lambda: before_holdout)
+    with pytest.raises(HoldoutUnavailable):
+        run_backtest(r, holdout=True, loader=loader, now=lambda: before_holdout,
+                     git_commit=lambda: None)  # fmt: skip
+    assert [p.name for p in r.backtest.output_dir.iterdir() if p.is_dir()] == []
 
 
 def test_harness_bugs_keep_their_traceback(monkeypatch: pytest.MonkeyPatch) -> None:

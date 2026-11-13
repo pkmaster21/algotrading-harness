@@ -277,8 +277,14 @@ def write_run(
     holdout: bool,
     run_info: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Write every run file into `run_dir` (created; must not exist) and return the summary."""
-    run_dir.mkdir(parents=True, exist_ok=False)
+    """Write every run file into `run_dir` and return the summary.
+
+    `run_dir` is created if missing. It may already exist only if it is empty (the run
+    entry point reserves the folder up front); results are never overwritten.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if any(run_dir.iterdir()):
+        raise FileExistsError(f"run folder {run_dir} already has files")
     trades = round_trips(result)
     summary = summarize(result, benchmark, recipe, holdout=holdout, trades=trades)
     _write_csv(run_dir / "trades.csv", TRADE_COLUMNS, trades)
