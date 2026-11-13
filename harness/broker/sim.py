@@ -33,7 +33,10 @@ class SimBroker(Broker):
     - Sells execute before buys, so exit proceeds fund same-session entries. Within each
       group, orders execute in submission order (construction's rank order).
     - Buys never take cash negative: the quantity is cut to the whole shares that fit at
-      the fill price ("reduced_for_cash"), or the order is canceled if none fit.
+      the fill price ("reduced_for_cash"), or the order is canceled if none fit. The
+      guarantee covers buys only. A sell (or forced close) whose commission exceeds its
+      proceeds reduces cash and can take it below zero; that needs a nonzero
+      `commission_per_order`, so it is unreachable at the configured $0.
     - A sell for a symbol not held is canceled ("not_held"); a sell larger than the
       position sells the position.
     - Slice 1 is long-only stock: multi-leg or option orders raise, and a buy for a

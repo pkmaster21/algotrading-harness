@@ -128,8 +128,11 @@ class Engine:
             return
         snapshot = self._mark(session)
         view = self._buffer.view()
+        # The strategy gets its own deep copy: the snapshot's positions dict is mutable, and
+        # construction below must size and count slots from what the broker reported, not
+        # from whatever the strategy did to its copy.
         with strategy_code():  # no file or network access from strategy code
-            emitted = self.strategy.on_bar(view, snapshot)
+            emitted = self.strategy.on_bar(view, snapshot.model_copy(deep=True))
         signals = self._validated(emitted, session)
         result = build_orders(signals, snapshot, closes, self.construction, self.costs)
         self.events.extend(result.events)

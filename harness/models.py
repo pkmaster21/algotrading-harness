@@ -359,7 +359,8 @@ class AccountState(FrozenModel):
 class PortfolioSnapshot(FrozenModel):
     """What a strategy sees about its holdings at the close of `as_of`.
 
-    The engine builds a fresh snapshot every session, so mutating it has no effect.
+    The engine hands each `on_bar` call its own deep copy, so mutating it (the positions
+    dict is an ordinary dict) affects neither order construction nor later sessions.
     `equity` is cash plus positions marked at the latest available close.
     """
 
