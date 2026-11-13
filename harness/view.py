@@ -75,6 +75,21 @@ class BarBuffer:
         self._stamps[i] = np.datetime64(session, "ns")
         self._length += 1
 
+    def trailing_missing(self, symbol: str) -> int:
+        """How many of the most recent sessions in a row have no bar for `symbol`.
+
+        0 when the latest session has a bar; `length` when the symbol never had one.
+        """
+        try:
+            j = self._index[symbol]
+        except KeyError:
+            raise KeyError(f"symbol {symbol!r} is not in the universe") from None
+        close = self._data["close"]
+        n = 0
+        while n < self._length and np.isnan(close[self._length - 1 - n, j]):
+            n += 1
+        return n
+
     def view(self) -> MarketView:
         """A view of every session appended so far."""
         if self._length == 0:

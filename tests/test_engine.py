@@ -5,10 +5,12 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Callable, Mapping, Sequence
 
+import numpy as np
 import pytest
 
 from harness.broker.sim import SimBroker
-from harness.engine import BacktestResult, StrategyError, simulate
+from harness.data import BarPanel
+from harness.engine import BacktestResult, Engine, StrategyError, simulate
 from harness.models import (
     MARKET_TZ,
     Fill,
@@ -21,7 +23,7 @@ from harness.models import (
     Signal,
     Stock,
 )
-from harness.view import MarketView
+from harness.view import PRICE_FIELDS, MarketView
 from strategies.base import Strategy
 from tests.fixture_strategies import BuyAndHold, Recorder
 from tests.synthetic import COSTS, construction, make_panel
@@ -63,6 +65,20 @@ def test_warmup_sessions_fill_the_view_without_calling_the_strategy() -> None:
     assert result.equity[0].equity == 10_000
 
 
+def test_warmup_sessions_never_reach_the_broker() -> None:
+    class Watched(SimBroker):
+        opened: list[dt.date] = []  # noqa: RUF012
+
+        def on_session_open(self, session: dt.date, opens: Mapping[str, float]) -> None:
+            self.opened.append(session)
+            super().on_session_open(session, opens)
+
+    panel = make_panel(SYMBOLS, 10)
+    broker = Watched(10_000, COSTS)
+    simulate(BuyAndHold(), panel, broker, SYMBOLS, construction(), COSTS, trade_from=4)
+    assert broker.opened == list(panel.dates[4:])
+
+
 def test_trade_from_out_of_range() -> None:
     with pytest.raises(ValueError):
         _sim(Recorder(), n=10, trade_from=10)
@@ -72,6 +88,107 @@ def test_first_trade_fills_the_session_after_trade_from() -> None:
     panel, result = _sim(BuyAndHold(), n=20, trade_from=5)
     (fill,) = result.fills
     assert (fill.signal_date, fill.fill_date) == (panel.dates[5], panel.dates[6])
+
+
+# --------------------------------------------------------------------------- rebuilt engine
+
+
+def _drive(engine: Engine, panel: BarPanel, sessions: range, warm: bool = False) -> None:
+    """Feed sessions of `panel` to the engine by hand, as warm-up or as traded sessions."""
+    for i in sessions:
+        session = panel.dates[i]
+        row = {f: panel.field(f)[i] for f in PRICE_FIELDS}
+        if warm:
+            engine.warm_up(session, row)
+            continue
+        opens = {
+            s: float(o) for s, o in zip(panel.symbols, row["open"], strict=True) if not np.isnan(o)
+        }
+        engine.on_session_open(session, opens)
+        engine.on_session_close(session, row)
+
+
+def _engine(broker: SimBroker, panel: BarPanel) -> Engine:
+    aapl = BuyAndHold(BuyAndHold.Params(symbol="AAPL"))
+    return Engine(aapl, broker, SYMBOLS, construction(), COSTS, panel.n_dates)
+
+
+def test_engine_rebuilt_mid_gap_force_closes_on_the_same_session() -> None:
+    # AAPL is bought on session 1 and has no bar from session 10 on. Uninterrupted, the
+    # position is force-closed on session 14 (the 5th missing session).
+    panel = make_panel(SYMBOLS, 20, missing={"AAPL": range(10, 20)})
+    whole = _engine(SimBroker(10_000, COSTS), panel)
+    _drive(whole, panel, range(20))
+    (expected,) = [e for e in whole.events if e.kind == "position_closed_no_data"]
+    assert expected.date == panel.dates[14]
+
+    # Same run, but the engine is thrown away after session 12 (3 missing sessions in) and
+    # a new one is built around the same broker from history alone.
+    broker = SimBroker(10_000, COSTS)
+    _drive(_engine(broker, panel), panel, range(13))
+    rebuilt = _engine(broker, panel)
+    _drive(rebuilt, panel, range(13), warm=True)
+    _drive(rebuilt, panel, range(13, 20))
+    (event,) = [e for e in rebuilt.events if e.kind == "position_closed_no_data"]
+    assert (event.date, event.detail.split(": ")[1]) == (
+        expected.date,
+        expected.detail.split(": ")[1],
+    )
+    assert broker.account().positions == {}
+    assert [p.equity for p in rebuilt.equity] == [p.equity for p in whole.equity[13:]]
+
+
+def test_warm_up_never_touches_the_broker() -> None:
+    # A held position with a gap in old history longer than the limit: replaying that
+    # history must not force-close it (or ask the broker anything at all).
+    class Untouchable(SimBroker):
+        armed = False
+
+        def account(self):  # type: ignore[no-untyped-def]
+            assert not self.armed, "warm_up asked the broker for the account"
+            return super().account()
+
+        def force_close(self, *args):  # type: ignore[no-untyped-def]
+            raise AssertionError("warm_up force-closed a position")
+
+        def poll_updates(self):  # type: ignore[no-untyped-def]
+            assert not self.armed, "warm_up polled the broker"
+            return super().poll_updates()
+
+    panel = make_panel(SYMBOLS, 20, missing={"AAPL": range(3, 9)})
+    broker = Untouchable(10_000, COSTS)
+    _drive(_engine(broker, panel), panel, range(3))  # buys AAPL at the open of session 1
+    assert "AAPL" in broker.account().positions
+
+    rebuilt = _engine(broker, panel)
+    broker.armed = True
+    _drive(rebuilt, panel, range(12), warm=True)
+    broker.armed = False
+    assert rebuilt.events == [] and rebuilt.equity == [] and rebuilt.orders == {}
+    assert rebuilt.last_close("AAPL") == float(panel.field("close")[11, panel.column("AAPL")])
+
+
+def test_broker_that_cannot_force_close_is_logged_every_session() -> None:
+    class NoForcedClose(SimBroker):
+        def force_close(self, symbol, price, price_date, session):  # type: ignore[no-untyped-def]
+            return None
+
+    panel = make_panel(SYMBOLS, 18, missing={"AAPL": range(10, 18)})
+    broker = NoForcedClose(10_000, COSTS)
+    engine = _engine(broker, panel)
+    _drive(engine, panel, range(18))
+    stale = [e for e in engine.events if e.kind == "position_stale_no_data"]
+    assert [e.date for e in stale] == list(panel.dates[14:18])
+    assert [e.detail.split(";")[0] for e in stale] == [
+        f"no bar for {n} sessions" for n in (5, 6, 7, 8)
+    ]
+    assert all(str(panel.dates[9]) in e.detail for e in stale)
+    assert not [e for e in engine.events if e.kind == "position_closed_no_data"]
+    assert "AAPL" in broker.account().positions
+    # Still marked at the last close it had.
+    qty = broker.account().positions["AAPL"].quantity
+    close9 = float(panel.field("close")[9, panel.column("AAPL")])
+    assert engine.equity[-1].market_value == pytest.approx(qty * close9)
 
 
 # --------------------------------------------------------------------------- validation

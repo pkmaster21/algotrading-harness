@@ -207,7 +207,15 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
 - **Delisted or missing-data positions are force-closed:** if a held symbol has no bar for N
   consecutive sessions (default 5, configurable), the engine closes it at its last close
   minus sell slippage and logs `position_closed_no_data`. The trade is marked
-  `exit_reason=no_data` in `trades.csv`.
+  `exit_reason=no_data` in `trades.csv`. The count is read from the bars (consecutive
+  sessions without one, ending now), not kept as a counter, so an engine rebuilt from
+  history is in the same state. A broker that cannot close at a stale price returns no
+  order id from `force_close`: the position stays and the engine logs
+  `position_stale_no_data` every session until it is gone.
+- **Warm-up is its own engine call (`Engine.warm_up`):** it adds a session's bars to the
+  view and does nothing else (no strategy call, no broker call, no forced close). Backtests
+  use it for sessions before the first traded one; the paper runner will use it to rebuild
+  the view each morning, where replaying old gaps must never touch real positions.
 - **Open positions at the end of a run are marked, not liquidated:** they appear in
   `trades.csv` as open; win rate counts closed trades only.
 - **Benchmark runs through the same engine:** SPY buy-and-hold uses the same SimBroker,
@@ -277,8 +285,9 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
 - Forced close at last close is optimistic for bankruptcies (the price collapses after
   delisting) but roughly right for acquisitions. Matters once the universe includes
   delisted names.
-- How AlpacaBroker handles a forced close in slice 2: the base `Broker.force_close` is a
-  sim concept; a real broker reports delistings itself, so this likely becomes reconciliation.
+- How a live broker resolves a stale position: `Broker.force_close` may now return None
+  (a real venue cannot sell at a stale price), and the engine logs it. Picking up what the
+  venue actually did (a delisting cash-out, for example) is reconciliation, not built yet.
 - A trading halt longer than N sessions also triggers a forced close. Rare; N is configurable.
 - The position cap can be exceeded when an exit is canceled at the next open. Construction
   counts today's exits as freed slots; if the exit then gets no bar (`no_bar`), the

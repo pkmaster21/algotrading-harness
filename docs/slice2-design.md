@@ -785,6 +785,16 @@ Steps, each journaled, with the kill latch checked between them:
 8. Reconcile again. Write the ledger snapshot, the equity point for t, `trades.csv`,
    `summary.json`, and `day_complete`. Release the lock.
 
+Two checks the runner makes before step 6, because the engine raises on both (found in
+the review of PR 5):
+
+- Every held symbol is in the profile's universe and has at least one bar in the
+  replayed history. Otherwise stop with a clear error (a manual trade in the paper
+  account is the likely cause).
+- A rebuilt engine starts with no `orders`. `OrderManager.poll_updates` must never
+  report an update without fills for an order this engine did not submit (a late cancel
+  or reject of an earlier day's order): those go to the journal, not to the engine.
+
 The slice 1 review's thread warning is met by construction: strategy code runs in step 6 inside
 `harness.guard`, venue I/O happens before and after it on the same thread, never during.
 

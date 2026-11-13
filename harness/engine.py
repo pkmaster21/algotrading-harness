@@ -8,6 +8,11 @@ Each session has two phases:
   positions in symbols that stopped trading, marks the portfolio to market, asks the
   strategy for signals, turns them into orders through construction, and submits them.
 
+Sessions before the first traded one go through `warm_up` instead: their bars enter the
+view and nothing else happens. Everything the engine keeps between sessions about the
+market (the view, last closes, how long a held symbol has had no bar) is a function of
+the bars it was fed, so an engine rebuilt from the same bars is in the same state.
+
 `simulate` drives both phases over a BarPanel for backtests. The engine never compares
 dates against any cutoff: it runs whatever panel the data loader produced, which is where
 the holdout boundary is enforced. It reads no clock, uses no randomness, and never
@@ -102,7 +107,6 @@ class Engine:
         self._universe_set = frozenset(self.universe)  # membership checks only
         self._last_close: dict[str, float] = {}
         self._last_close_date: dict[str, dt.date] = {}
-        self._missing: dict[str, int] = {}  # held symbol -> consecutive sessions without a bar
         self.orders: dict[str, Order] = {}
         self.updates: list[OrderUpdate] = []
         self.events: list[EngineEvent] = []
@@ -117,16 +121,18 @@ class Engine:
         self.broker.on_session_open(session, opens)
         self._collect_updates(session)
 
-    def on_session_close(
-        self, session: dt.date, row: Mapping[str, np.ndarray], trade: bool = True
-    ) -> None:
-        """Process the close of `session`. With `trade=False` (warm-up) the bars are added
-        to the view but the strategy is not called and no equity point is recorded."""
+    def warm_up(self, session: dt.date, row: Mapping[str, np.ndarray]) -> None:
+        """Add the bars of a session that is not traded (history before the first traded
+        session) to the view. The broker is not touched: no orders, no forced closes, no
+        equity point, and the strategy is not called."""
+        self._buffer.append(session, row)
+        self._update_closes(session, row["close"])
+
+    def on_session_close(self, session: dt.date, row: Mapping[str, np.ndarray]) -> None:
+        """Process the close of `session`: bars, forced closes, mark, signals, orders."""
         self._buffer.append(session, row)
         closes = self._update_closes(session, row["close"])
         self._force_close_stale(session)
-        if not trade:
-            return
         snapshot = self._mark(session)
         view = self._buffer.view()
         # The strategy gets its own deep copy: the snapshot's positions dict is mutable, and
@@ -203,19 +209,32 @@ class Engine:
             closes[symbol] = value
             self._last_close[symbol] = value
             self._last_close_date[symbol] = session
-        held = self.broker.account().positions
-        for symbol in held:
-            self._missing[symbol] = 0 if symbol in closes else self._missing.get(symbol, 0) + 1
-        for symbol in [s for s in self._missing if s not in held]:
-            del self._missing[symbol]
         return closes
 
     def _force_close_stale(self, session: dt.date) -> None:
+        """Close held positions whose symbol has had no bar for `max_missing_sessions`.
+
+        The count is read from the view (consecutive sessions without a bar, ending now),
+        not kept as a counter, so it survives the engine being rebuilt. It can only cover
+        sessions the position was held for: a position is opened by a fill, and a fill
+        needs a bar that session.
+
+        A broker that cannot close at a stale price returns no order id. The position
+        stays, and this is logged again every session until it is gone.
+        """
         limit = self.construction.max_missing_sessions
-        for symbol in sorted(s for s, n in self._missing.items() if n >= limit):
+        for symbol in sorted(self.broker.account().positions):
+            missing = self._buffer.trailing_missing(symbol)
+            if missing < limit:
+                continue
             last_date = self._last_close_date[symbol]
             order_id = self.broker.force_close(symbol, self._last_close[symbol], last_date, session)
-            del self._missing[symbol]
+            if order_id is None:
+                self._log(
+                    session, "position_stale_no_data", symbol,
+                    f"no bar for {missing} sessions; last close {last_date}; not closed",
+                )  # fmt: skip
+                continue
             self._collect_updates(session)
             self._log(
                 session, "position_closed_no_data", symbol,
@@ -298,8 +317,11 @@ def simulate(
         opens = {
             s: float(row["open"][j]) for j, s in enumerate(universe) if not np.isnan(row["open"][j])
         }
+        if i < trade_from:
+            engine.warm_up(session, row)
+            continue
         engine.on_session_open(session, opens)
-        engine.on_session_close(session, row, trade=i >= trade_from)
+        engine.on_session_close(session, row)
     engine.finish(panel.dates[-1])
     return BacktestResult(
         strategy=strategy.strategy_name(),
