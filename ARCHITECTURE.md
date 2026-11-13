@@ -36,6 +36,7 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/models.py` | Shared data shapes: Bar, Stock, OptionContract, Leg, Signal, Fill, Position | 1 |
 | `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models | 1 |
 | `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff | 1 |
+| `harness/ratelimit.py` | Request rate limiter shared by the data loader and the venue adapter | 2 |
 | `harness/keys.py` | Read API keys from `.env` into a redacted local object; never touches the environment | 2 |
 | `harness/view.py` | Append-only bar buffer and the read-only `MarketView` strategies receive | 1 |
 | `harness/guard.py` | Runtime guard: rejects file opens, network use, and process starts while strategy code runs | 1 |
@@ -46,6 +47,7 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/engine.py` | Daily loop; hands strategies a past-only view; fills at next open | 1 |
 | `harness/broker/base.py` | Broker interface shared by all adapters | 1 |
 | `harness/broker/sim.py` | Simulated fills for backtests | 1 |
+| `harness/broker/venue.py` | Venue protocol: place, report and cancel single orders. Its models refuse order shapes the harness never sends (a buy that is not a limit order, fractional shares) | 2 |
 | `harness/run.py` | `run_backtest(recipe)` function plus a thin CLI over it; loads strategies by name, checks their imports | 1 |
 | `harness/report.py` | Run outputs with a fixed schema, the resolved recipe per run, metrics, SPY benchmark, run index | 1 |
 | `harness/indicators.py` | Indicator calculations (SMA, RSI, ...) from past bars only; each addition is reviewed with a look-ahead test | Rules |

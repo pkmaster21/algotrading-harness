@@ -29,7 +29,6 @@ import hashlib
 import math
 import os
 import tempfile
-import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -44,6 +43,7 @@ from pydantic import Field
 from harness.config import DataConfig, DateConfig
 from harness.keys import KeysError, read_alpaca_paper_keys
 from harness.models import MARKET_TZ, FrozenModel, Stock
+from harness.ratelimit import RateLimiter
 from harness.view import PRICE_FIELDS, PriceField
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -261,31 +261,6 @@ def _clean(frame: pd.DataFrame | None) -> pd.DataFrame:
     for f in PRICE_FIELDS:
         out[f] = out[f].astype("float64")
     return out.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
-
-
-class RateLimiter:
-    """Allows at most `max_per_minute` request tokens in any 60-second window."""
-
-    def __init__(
-        self,
-        max_per_minute: int,
-        clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
-    ) -> None:
-        self._max = max_per_minute
-        self._clock = clock
-        self._sleep = sleep
-        self._stamps: list[float] = []
-
-    def acquire(self, n: int = 1) -> None:
-        for _ in range(n):
-            while True:
-                now = self._clock()
-                self._stamps = [t for t in self._stamps if now - t < 60.0]
-                if len(self._stamps) < self._max:
-                    self._stamps.append(now)
-                    break
-                self._sleep(60.0 - (now - self._stamps[0]))
 
 
 def frames_from_alpaca_df(df: pd.DataFrame, symbols: Sequence[str]) -> dict[str, pd.DataFrame]:

@@ -16,9 +16,9 @@ from harness.data import (
     DataError,
     DataLoader,
     HoldoutAccess,
-    RateLimiter,
     frames_from_alpaca_df,
 )
+from harness.ratelimit import RateLimiter
 from tests.fake_alpaca import NOW, FakeFetcher, recipe, tmp_config
 
 ACCESS = HoldoutAccess(run_id="r", strategy="s")

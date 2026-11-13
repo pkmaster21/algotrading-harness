@@ -94,6 +94,7 @@ simulator items can only be settled by the end-to-end run (PR 22).
 | An open sell order reserves the shares it covers | Protective-stop conflict above |
 | Account activities expose per-execution fills | Ledger upgrade path |
 | The full set of order status strings | Status mapping |
+| An `opg` order that does not fill in the auction ends as `canceled` (not `expired`) | Fake venue (`OPG_GRACE_SECONDS`); the order manager must not depend on which |
 
 ---
 
@@ -955,9 +956,9 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 8 | `feat(config): risk presets and execution settings` | `config/risk/*.yaml`, `config/execution.yaml`, models, `Recipe.risk` | Config boundary |
 | 9 | `feat(risk): hard limits` | `harness/risk.py`, engine hook, `risk: none` label; error (not a warning) at recipe load unless the preset leaves room for one equal-weight position (`max_position_pct` against `1 / max_positions` at the worst-case price), since the placeholder `conservative` preset does not | `harness/` boundary |
 | 10 | `feat(broker): venue protocol and fake venue` | `venue.py`, `tests/fake_venue.py`, `RateLimiter` move | |
-| 11 | `feat(positions): journal, ledger, reconciliation` | `journal.py`, `positions.py` | |
+| 11 | `feat(positions): journal, ledger, reconciliation` | `journal.py`, `positions.py`; venue data that fails model validation (a zero average price, a non-finite number) is reported as "venue data failed validation, stopping", not as a raw traceback | |
 | 12 | `feat(killswitch): kill latch and alerts` | `killswitch.py`, `alerts.py` | |
-| 13 | `feat(orders): idempotent submission and recovery` | `OrderManager` core: staging, ids, protocol, `recover`, crash tests | `harness/` boundary |
+| 13 | `feat(orders): idempotent submission and recovery` | `OrderManager` core: staging, ids, protocol, `recover`, crash tests; every final status without a fill (canceled, expired, rejected) is handled the same way, so the exact status a venue uses does not matter | `harness/` boundary |
 | 14 | `feat(orders): open workflow` | Exits, release with `review_release` (added to `risk.py` here, with its caller: actual cash, `no_leverage`, the `max_positions` cap), limit pricing, deadlines; contract suite now also runs against `OrderManager`, with a partial-fill contract test added | |
 | 15 | `feat(orders): manual approval for entries` | Approval gate, inbox | |
 | 16 | `feat(broker): Alpaca paper adapter` | `alpaca.py`; every **(verify)** item checked against the docs first and recorded in the PR | Credentials, dependencies if alpaca-py needs a bump |
