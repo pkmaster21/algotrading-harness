@@ -36,6 +36,7 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/models.py` | Shared data shapes: Bar, Stock, OptionContract, Leg, Signal, Fill, Position | 1 |
 | `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models | 1 |
 | `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff | 1 |
+| `harness/keys.py` | Read API keys from `.env` into a redacted local object; never touches the environment | 2 |
 | `harness/view.py` | Append-only bar buffer and the read-only `MarketView` strategies receive | 1 |
 | `harness/guard.py` | Runtime guard: rejects file opens, network use, and process starts while strategy code runs | 1 |
 | `strategies/base.py` | `Strategy` interface; each strategy declares a pydantic `Params` class and receives it in its constructor | 1 |
@@ -66,7 +67,9 @@ re-validated through backtest and paper trading.
   changes stay deliberate and reviewed. Locked means reviewed, not frozen. Code belongs in
   `harness/` when a bug in it would silently break every strategy or run.
 - **`strategies/` is the sandbox:** the only place AI-written code lands day to day.
-- **Keys live only in `.env`.** Only the data loader and broker adapters read them.
+- **Keys live only in `.env`.** Only the data loader and broker adapters read them, through
+  `harness/keys.py`, into local variables. They are never exported to the process
+  environment and never taken from it.
   Claude Code settings deny reading `.env`.
 - **Paper and live keys use different variable names**, and live trading requires an
   explicit flag. Paper is the default everywhere.

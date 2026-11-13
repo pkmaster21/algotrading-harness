@@ -43,6 +43,7 @@ import pyarrow.parquet as pq
 from pydantic import Field
 
 from harness.config import DataConfig, DateConfig
+from harness.keys import KeysError, read_alpaca_paper_keys
 from harness.models import FrozenModel, Stock
 from harness.view import PRICE_FIELDS, PriceField
 
@@ -307,9 +308,10 @@ def frames_from_alpaca_df(df: pd.DataFrame, symbols: Sequence[str]) -> dict[str,
 class AlpacaBarFetcher:
     """Adjusted daily SIP bars from Alpaca's historical data API (read-only).
 
-    Reads ALPACA_PAPER_API_KEY and ALPACA_PAPER_SECRET_KEY from the environment, loading
-    `.env` first. It is built lazily by the loader, only when a download is needed, so
-    runs served entirely from cache need no keys. Requests are throttled by a
+    Reads ALPACA_PAPER_API_KEY and ALPACA_PAPER_SECRET_KEY from `.env` into local
+    variables (see `harness.keys`); they are never exported to the process environment.
+    It is built lazily by the loader, only when a download is needed, so runs served
+    entirely from cache need no keys. Requests are throttled by a
     RateLimiter (one token per expected page of 10,000 bars); alpaca-py also retries
     HTTP 429 responses itself.
     """
@@ -323,19 +325,14 @@ class AlpacaBarFetcher:
         dotenv_path: Path = PROJECT_ROOT / ".env",
     ) -> None:
         from alpaca.data.historical import StockHistoricalDataClient
-        from dotenv import load_dotenv
 
-        load_dotenv(dotenv_path)
-        key = os.environ.get("ALPACA_PAPER_API_KEY")
-        secret = os.environ.get("ALPACA_PAPER_SECRET_KEY")
-        if not key or not secret:
-            raise DataError(
-                "ALPACA_PAPER_API_KEY and ALPACA_PAPER_SECRET_KEY must be set (in .env) "
-                "to download bars"
-            )
+        try:
+            keys = read_alpaca_paper_keys(dotenv_path)
+        except KeysError as exc:
+            raise DataError(f"{exc} to download bars") from None
         self._cfg = cfg
         self._limiter = limiter
-        self._client = StockHistoricalDataClient(api_key=key, secret_key=secret)
+        self._client = StockHistoricalDataClient(api_key=keys.key_id, secret_key=keys.secret_key)
 
     def fetch(
         self, symbols: Sequence[str], start: dt.date, end: dt.date
