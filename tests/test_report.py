@@ -14,9 +14,11 @@ import yaml
 
 from harness.broker.sim import SimBroker
 from harness.engine import BacktestResult, EquityPoint, simulate
+from harness.models import MARKET_TZ, Fill, FillKind, OrderUpdate, Position, Side, Stock
 from harness.report import (
     INDEX_COLUMNS,
     TRADE_COLUMNS,
+    ReportError,
     append_index,
     return_metrics,
     round_trips,
@@ -87,6 +89,174 @@ def test_forced_close_trade_is_labeled_no_data() -> None:
     (trade,) = round_trips(result)
     assert trade["exit_reason"] == "no_data"
     assert trade["exit_date"] == panel.dates[15].isoformat()
+
+
+# --------------------------------------------------------------------------- multi-fill trades
+
+DAYS = [dt.date(2024, 1, d) for d in (2, 3, 4, 5, 8)]  # five sessions; signals on DAYS[0]
+
+
+def _fill(
+    order_id: str,
+    side: Side,
+    quantity: int,
+    price: float,
+    day: int,
+    *,
+    symbol: str = "AAPL",
+    commission: float = 0.0,
+    kind: FillKind = "venue",
+) -> Fill:
+    """A fill on DAYS[day]. Venue fills carry a time; a forced close uses a stale price."""
+    date = DAYS[day]
+    forced = kind == "forced_close"
+    return Fill(
+        order_id=order_id,
+        kind=kind,
+        signal_date=date if forced else DAYS[day - 1],
+        fill_date=date,
+        price_date=DAYS[day - 1] if forced else date,
+        instrument=Stock(symbol=symbol),
+        side=side,
+        quantity=quantity,
+        reference_price=price,
+        price=price,
+        slippage_cost=0.0,
+        commission=commission,
+        filled_at=None if forced else dt.datetime.combine(date, dt.time(9, 31), MARKET_TZ),
+    )
+
+
+def _result_with_fills(
+    fills: list[Fill], final: dict[str, tuple[int, float]] | None = None
+) -> BacktestResult:
+    """A result whose updates carry `fills`, one update each. `final` maps a symbol still
+    held at the end to (quantity, last close)."""
+    final = final or {}
+    positions = {
+        s: Position(
+            instrument=Stock(symbol=s),
+            quantity=q,
+            avg_price=mark,
+            entry_date=DAYS[1],
+            entry_order_id="e1",
+        )
+        for s, (q, mark) in final.items()
+    }
+    return _result_with_equity([100.0] * len(DAYS)).model_copy(
+        update={
+            "start": DAYS[0],
+            "end": DAYS[-1],
+            "equity": tuple(
+                EquityPoint(date=d, cash=100.0, market_value=0.0, equity=100.0, n_positions=0)
+                for d in DAYS
+            ),
+            "updates": tuple(
+                OrderUpdate(order_id=f.order_id, status="partially_filled", fills=(f,))
+                for f in fills
+            ),
+            "final_positions": positions,
+            "final_marks": {s: mark for s, (_, mark) in final.items()},
+        }
+    )
+
+
+def test_entry_filled_in_pieces_is_one_trade_at_the_average_price() -> None:
+    result = _result_with_fills(
+        [
+            _fill("e1", "buy", 3, 100.0, 1, commission=1.0),
+            _fill("e1", "buy", 7, 101.0, 1, commission=1.0),
+            _fill("x1", "sell", 10, 110.0, 3, commission=0.5),
+        ]
+    )
+    (trade,) = round_trips(result)
+    assert trade["quantity"] == 10
+    assert trade["entry_price"] == pytest.approx(100.7)  # (3 * 100 + 7 * 101) / 10
+    assert trade["exit_price"] == 110.0
+    assert (trade["entry_cost"], trade["exit_cost"]) == (2.0, 0.5)
+    assert trade["pnl"] == pytest.approx(1100 - 0.5 - (1007 + 2))
+    assert trade["return_pct"] == pytest.approx(trade["pnl"] / 1009)
+    assert (trade["entry_date"], trade["exit_date"]) == ("2024-01-03", "2024-01-05")
+    assert (trade["holding_days"], trade["exit_reason"], trade["is_open"]) == (2, "signal", False)
+
+
+def test_exit_spread_over_two_sessions_closes_when_flat() -> None:
+    result = _result_with_fills(
+        [
+            _fill("e1", "buy", 10, 100.0, 1),
+            _fill("x1", "sell", 4, 110.0, 2),  # partly filled exit; remainder sold next day
+            _fill("x2", "sell", 6, 105.0, 3, commission=1.0),
+        ]
+    )
+    (trade,) = round_trips(result)
+    assert trade["quantity"] == 10
+    assert trade["exit_price"] == pytest.approx(107.0)  # (4 * 110 + 6 * 105) / 10
+    assert trade["pnl"] == pytest.approx(440 + 630 - 1.0 - 1000)
+    assert trade["exit_date"] == "2024-01-05"  # the fill that made the position flat
+    assert (trade["holding_days"], trade["is_open"]) == (2, False)
+
+
+def test_partly_exited_position_still_open_at_the_end() -> None:
+    result = _result_with_fills(
+        [_fill("e1", "buy", 10, 100.0, 1), _fill("x1", "sell", 4, 110.0, 2, commission=1.0)],
+        final={"AAPL": (6, 120.0)},
+    )
+    (trade,) = round_trips(result)
+    assert (trade["is_open"], trade["exit_reason"], trade["quantity"]) == (True, "open", 10)
+    assert trade["exit_price"] == pytest.approx(116.0)  # (4 sold at 110 + 6 marked at 120) / 10
+    assert trade["exit_cost"] == 1.0  # only what was actually paid
+    assert trade["pnl"] == pytest.approx(440 + 720 - 1.0 - 1000)
+    assert trade["exit_date"] == DAYS[-1].isoformat()
+
+
+def test_forced_close_of_a_remainder_is_labeled_no_data() -> None:
+    result = _result_with_fills(
+        [
+            _fill("e1", "buy", 10, 100.0, 1),
+            _fill("x1", "sell", 4, 110.0, 2),
+            _fill("f1", "sell", 6, 90.0, 4, kind="forced_close"),
+        ]
+    )
+    (trade,) = round_trips(result)
+    assert (trade["exit_reason"], trade["exit_date"]) == ("no_data", DAYS[4].isoformat())
+    assert trade["pnl"] == pytest.approx(440 + 540 - 1000)
+
+
+def test_reentry_after_flat_is_a_new_trade_and_symbols_are_independent() -> None:
+    result = _result_with_fills(
+        [
+            _fill("e1", "buy", 5, 100.0, 1),
+            _fill("m1", "buy", 2, 300.0, 1, symbol="MSFT"),
+            _fill("x1", "sell", 5, 101.0, 2),
+            _fill("e2", "buy", 5, 102.0, 3),
+        ],
+        final={"AAPL": (5, 104.0), "MSFT": (2, 310.0)},
+    )
+    trades = round_trips(result)
+    assert [(t["symbol"], t["entry_date"], t["is_open"]) for t in trades] == [
+        ("AAPL", "2024-01-03", False),
+        ("MSFT", "2024-01-03", True),
+        ("AAPL", "2024-01-05", True),
+    ]
+    assert [t["pnl"] for t in trades] == pytest.approx([5.0, 20.0, 10.0])
+
+
+@pytest.mark.parametrize(
+    ("fills", "final", "match"),
+    [
+        ([("e1", "buy", 5, 1), ("e2", "buy", 5, 2)], {"AAPL": (10, 100.0)}, "second entry"),
+        ([("x1", "sell", 5, 1)], {}, "without an entry"),
+        ([("e1", "buy", 5, 1), ("x1", "sell", 6, 2)], {}, "more than the position"),
+        ([("e1", "buy", 5, 1), ("x1", "sell", 2, 2)], {}, "not in final positions"),
+        ([("e1", "buy", 5, 1), ("x1", "sell", 2, 2)], {"AAPL": (5, 100.0)}, "leave 3 shares"),
+    ],
+)
+def test_fills_that_do_not_add_up_are_an_error(
+    fills: list[tuple[str, Side, int, int]], final: dict[str, tuple[int, float]], match: str
+) -> None:
+    result = _result_with_fills([_fill(i, s, q, 100.0, day) for i, s, q, day in fills], final)
+    with pytest.raises(ReportError, match=match):
+        round_trips(result)
 
 
 def test_benchmark_runs_through_the_same_engine(tmp_path: Path) -> None:

@@ -218,6 +218,10 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   the view each morning, where replaying old gaps must never touch real positions.
 - **Open positions at the end of a run are marked, not liquidated:** they appear in
   `trades.csv` as open; win rate counts closed trades only.
+- **A trade is one position, from its first entry fill until it is flat:** an order can
+  fill in pieces and an exit can take more than one order (live only; the sim fills each
+  order once). All those fills are one row in `trades.csv`, with entry and exit prices
+  averaged by shares. Single-fill trades are reported exactly as before.
 - **Benchmark runs through the same engine:** SPY buy-and-hold uses the same SimBroker,
   costs, next-open fill, and whole shares as the strategy, so the comparison is like for like.
 
@@ -294,6 +298,11 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   position stays and the replacement entry still fills with whatever cash is left, giving
   `max_positions + 1` holdings (the extra one is small). Belongs in the slice 2 risk
   manager, which sees positions at fill time.
+- Realized versus unrealized P&L in `trades.csv`: a position that is partly sold when the
+  report is written is one open row, and its `pnl` mixes realized gains (shares sold) with
+  unrealized ones (shares marked at the last close). Common in paper, where the report is
+  written daily. Fine for judging a strategy; not for realized P&L (taxes, once live).
+  When needed, add `exit_quantity` and `realized_pnl` columns rather than splitting rows.
 - Vendor adjustment lag: the overlap check compares the last `overlap_bars` cached bars.
   If Alpaca applies a split or dividend adjustment more than that many sessions after the
   ex-date, the check passes and the cache mixes scales until the scheduled full refresh

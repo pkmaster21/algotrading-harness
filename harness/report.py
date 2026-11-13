@@ -85,51 +85,78 @@ def run_benchmark(
 # --------------------------------------------------------------------------- trades
 
 
-def round_trips(result: BacktestResult) -> list[dict[str, Any]]:
-    """Pair each entry fill with its exit fill.
+class _OpenTrade:
+    """Fills of one position, from the first buy until it is flat again."""
 
-    Positions still open at the end are marked at their last close, with no exit cost,
-    and reported with is_open=True. Holding days count trading sessions from the entry
-    fill to the exit fill (or to the last session for open trades).
+    def __init__(self, entry_order_id: str) -> None:
+        self.entry_order_id = entry_order_id
+        self.buys: list[Fill] = []
+        self.sells: list[Fill] = []
+
+    @property
+    def remaining(self) -> int:
+        return sum(f.quantity for f in self.buys) - sum(f.quantity for f in self.sells)
+
+
+def round_trips(result: BacktestResult) -> list[dict[str, Any]]:
+    """One trade per position, from the first entry fill until the position is flat.
+
+    An order can fill in several pieces, and an exit can take more than one order (a
+    partly filled exit leaves a remainder that is sold later). All of those fills belong
+    to one trade: its quantity is the shares bought, and its entry and exit prices are
+    averages weighted by shares. Buys from a second order while the position is open are
+    an error, because the harness never adds to a position.
+
+    Positions still open at the end are reported with is_open=True: the shares left are
+    marked at their last close with no exit cost, and averaged with any shares already
+    sold. Holding days count trading sessions from the first entry fill to the fill that
+    closed the position (or to the last session for open trades).
     """
     session_index = {p.date: i for i, p in enumerate(result.equity)}
-    open_entries: dict[str, Fill] = {}
+    open_trades: dict[str, _OpenTrade] = {}
     trades: list[dict[str, Any]] = []
     for fill in result.fills:
         symbol = fill.instrument.key
+        trade = open_trades.get(symbol)
         if fill.side == "buy":
-            if symbol in open_entries:
+            if trade is None:
+                trade = open_trades[symbol] = _OpenTrade(fill.order_id)
+            elif fill.order_id != trade.entry_order_id:
                 raise ReportError(f"second entry for {symbol} while open")
-            open_entries[symbol] = fill
+            trade.buys.append(fill)
             continue
-        entry = open_entries.pop(symbol, None)
-        if entry is None:
+        if trade is None:
             raise ReportError(f"exit for {symbol} without an entry")
-        if fill.quantity != entry.quantity:
-            raise ReportError(f"partial exit for {symbol} is not supported in slice 1")
-        trades.append(
-            _trade(
-                entry,
-                exit_date=fill.fill_date,
-                exit_price=fill.price,
-                exit_cost=fill.slippage_cost + fill.commission,
-                exit_commission=fill.commission,
-                exit_reason="no_data" if fill.kind == "forced_close" else "signal",
-                session_index=session_index,
+        if fill.quantity > trade.remaining:
+            raise ReportError(f"exit for {symbol} sells more than the position holds")
+        trade.sells.append(fill)
+        if trade.remaining == 0:
+            del open_trades[symbol]
+            trades.append(
+                _trade(
+                    trade,
+                    exit_date=fill.fill_date,
+                    mark=None,
+                    exit_reason="no_data" if fill.kind == "forced_close" else "signal",
+                    session_index=session_index,
+                )
             )
-        )
 
     last_date = result.equity[-1].date if result.equity else result.end
-    for symbol, entry in open_entries.items():
-        if symbol not in result.final_positions:
+    for symbol, trade in open_trades.items():
+        position = result.final_positions.get(symbol)
+        if position is None:
             raise ReportError(f"{symbol} is open in fills but not in final positions")
+        if position.quantity != trade.remaining:
+            raise ReportError(
+                f"{symbol}: fills leave {trade.remaining} shares but the final position "
+                f"holds {position.quantity}"
+            )
         trades.append(
             _trade(
-                entry,
+                trade,
                 exit_date=last_date,
-                exit_price=result.final_marks[symbol],
-                exit_cost=0.0,
-                exit_commission=0.0,
+                mark=result.final_marks[symbol],
                 exit_reason="open",
                 session_index=session_index,
             )
@@ -138,29 +165,49 @@ def round_trips(result: BacktestResult) -> list[dict[str, Any]]:
     return trades
 
 
+def _units(fill: Fill) -> float:
+    return fill.quantity * fill.instrument.multiplier
+
+
+def _average_price(lots: Sequence[tuple[float, float]]) -> float:
+    """Average of (price, units) lots, weighted by units.
+
+    When every lot has the same price that price is returned as is, so a single fill
+    reports its exact fill price (no rounding from multiplying and dividing back).
+    """
+    first = lots[0][0]
+    if all(price == first for price, _ in lots):
+        return first
+    return sum(price * units for price, units in lots) / sum(units for _, units in lots)
+
+
 def _trade(
-    entry: Fill,
+    trade: _OpenTrade,
     *,
     exit_date: dt.date,
-    exit_price: float,
-    exit_cost: float,
-    exit_commission: float,
+    mark: float | None,
     exit_reason: str,
     session_index: Mapping[dt.date, int],
 ) -> dict[str, Any]:
-    units = entry.quantity * entry.instrument.multiplier
-    cost_basis = entry.price * units + entry.commission
-    pnl = exit_price * units - exit_commission - cost_basis
+    """Build one trades.csv row. `mark` values the shares not yet sold (open trades)."""
+    buys, sells = trade.buys, trade.sells
+    entry = buys[0]
+    exit_lots = [(f.price, _units(f)) for f in sells]
+    if mark is not None:
+        exit_lots.append((mark, trade.remaining * entry.instrument.multiplier))
+    cost_basis = sum(f.price * _units(f) for f in buys) + sum((f.commission for f in buys), 0.0)
+    proceeds = sum(price * units for price, units in exit_lots)
+    pnl = proceeds - sum((f.commission for f in sells), 0.0) - cost_basis
     start_i, end_i = session_index.get(entry.fill_date), session_index.get(exit_date)
     return {
         "symbol": entry.instrument.key,
         "entry_date": entry.fill_date.isoformat(),
         "exit_date": exit_date.isoformat(),
-        "quantity": entry.quantity,
-        "entry_price": entry.price,
-        "exit_price": exit_price,
-        "entry_cost": entry.slippage_cost + entry.commission,
-        "exit_cost": exit_cost,
+        "quantity": sum(f.quantity for f in buys),
+        "entry_price": _average_price([(f.price, _units(f)) for f in buys]),
+        "exit_price": _average_price(exit_lots),
+        "entry_cost": sum((f.slippage_cost + f.commission for f in buys), 0.0),
+        "exit_cost": sum((f.slippage_cost + f.commission for f in sells), 0.0),
         "pnl": pnl,
         "return_pct": pnl / cost_basis,
         "holding_days": end_i - start_i if start_i is not None and end_i is not None else None,
