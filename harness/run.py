@@ -7,14 +7,18 @@ strategy module in `strategies/` and its params. The strategy is loaded and its 
 validated before any data is loaded, so a bad preset fails immediately.
 
 Strategy modules are checked before they are imported: every import must be on an
-allowlist, and calls to builtins that reach files or code execution are rejected. This
-catches accidental file, environment, network, or broker access; it is not a sandbox.
+allowlist, and names that reach files, the network, the environment, or code execution
+are rejected (builtins like `open`, and I/O functions of the allowed libraries such as
+`pd.read_csv` or `np.load`). This catches accidental file, environment, network, or
+broker access; it is not a sandbox. `harness.guard` backs it up at run time while
+strategy code executes.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import datetime as dt
 import hashlib
 import importlib
@@ -51,8 +55,28 @@ ALLOWED_HARNESS_IMPORTS = frozenset(
     {"harness.models", "harness.view", "harness.indicators", "strategies.base"}
 )
 FORBIDDEN_CALLS = frozenset(
-    {"open", "exec", "eval", "compile", "__import__", "breakpoint", "input", "globals", "vars"}
+    {"exec", "eval", "compile", "__import__", "breakpoint", "input", "globals", "vars"}
 )
+# Rejected wherever they appear: as a bare name, an attribute (`typing.sys`,
+# `pd.io.common.os`), or an imported name (`from statistics import sys`). Covers aliasing
+# such as `o = open`, which a call-only check misses.
+FORBIDDEN_NAMES = frozenset({"open", "__builtins__", "builtins", "sys", "os"})
+# pydantic.v1 ships BaseSettings, which reads environment variables and .env files.
+FORBIDDEN_MODULES = frozenset({"pydantic.v1"})
+# Attribute and imported names that mean file or network I/O in the allowed libraries
+# (pandas readers and writers, numpy load/save). Matched by name alone, on any object, so
+# a strategy's own attribute with one of these names is rejected too: rename it. Only
+# `read_` is a prefix (every pandas `read_*` is I/O); load and save are exact names, so
+# `self.loaded` or `save_state` stay usable.
+IO_NAME_PREFIXES = ("read_",)
+IO_NAMES = frozenset(
+    {"load", "loads", "loadtxt", "save", "savez", "savez_compressed", "savetxt",
+     "fromfile", "tofile", "memmap", "open_memmap", "genfromtxt", "fromregex", "dump",
+     "DataSource", "ExcelFile", "ExcelWriter", "HDFStore",
+     "to_csv", "to_parquet", "to_pickle", "to_feather", "to_hdf", "to_excel", "to_json",
+     "to_html", "to_xml", "to_latex", "to_stata", "to_orc", "to_sql", "to_gbq",
+     "to_clipboard", "to_markdown", "to_string"}
+)  # fmt: skip
 DEFAULT_UNIVERSE = "plumbing-10"
 
 
@@ -73,31 +97,77 @@ USER_ERRORS = (ConfigError, StrategyLoadError, DataError, HoldoutLogError, Holdo
 # --------------------------------------------------------------------------- loading
 
 
+def _is_io_name(name: str) -> bool:
+    return name in IO_NAMES or name.startswith(IO_NAME_PREFIXES)
+
+
+def _name_problem(name: str) -> str | None:
+    """Why `name` may not appear in a strategy (as attribute or imported name), or None."""
+    if name in FORBIDDEN_NAMES:
+        return f"{name} is not allowed"
+    if _is_io_name(name):
+        return f"{name} looks like file or network I/O, which strategies may not do"
+    return None
+
+
+def _module_forbidden(module: str) -> bool:
+    return any(module == m or module.startswith(m + ".") for m in FORBIDDEN_MODULES)
+
+
 def check_strategy_source(source: str, filename: str = "<strategy>") -> list[str]:
     """Return a list of problems with a strategy module's source (empty if allowed)."""
     try:
         tree = ast.parse(source, filename=filename)
     except SyntaxError as exc:
         return [f"syntax error: {exc}"]
-    problems: list[tuple[int, str]] = []  # (line, message), sorted by line at the end
+    problems: set[tuple[int, str]] = set()  # (line, message); sorted by line at the end
+    # Local name -> module it is bound to (`import pydantic as p` binds p to pydantic),
+    # collected first so `p.v1` is recognized wherever the import sits in the file.
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".", 1)[0]
+                aliases[alias.asname or top] = alias.name if alias.asname else top
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if not _import_allowed(alias.name):
-                    problems.append((node.lineno, f"import {alias.name} is not allowed"))
+                    problems.add((node.lineno, f"import {alias.name} is not allowed"))
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             if node.level > 0:
-                problems.append((node.lineno, "relative imports are not allowed"))
-            elif not _import_allowed(module):
-                problems.append((node.lineno, f"from {module} import ... is not allowed"))
+                problems.add((node.lineno, "relative imports are not allowed"))
+                continue
+            if not _import_allowed(module):
+                problems.add((node.lineno, f"from {module} import ... is not allowed"))
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    problems.add((node.lineno, f"from {module} import * is not allowed"))
+                elif _module_forbidden(f"{module}.{alias.name}"):
+                    problems.add((node.lineno, f"import {module}.{alias.name} is not allowed"))
+                elif problem := _name_problem(alias.name):
+                    problems.add((node.lineno, f"from {module} import {alias.name}: {problem}"))
+        elif isinstance(node, ast.Name):
+            if node.id in FORBIDDEN_NAMES:
+                problems.add((node.lineno, f"{node.id} is not allowed"))
+        elif isinstance(node, ast.Attribute):
+            if problem := _name_problem(node.attr):
+                problems.add((node.lineno, f"attribute .{node.attr}: {problem}"))
+            elif isinstance(node.value, ast.Name) and _module_forbidden(
+                f"{aliases.get(node.value.id, '')}.{node.attr}"
+            ):
+                problems.add((node.lineno, f"{node.value.id}.{node.attr} is not allowed"))
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in FORBIDDEN_CALLS:
-                problems.append((node.lineno, f"call to {node.func.id}() is not allowed"))
+                problems.add((node.lineno, f"call to {node.func.id}() is not allowed"))
     return [f"line {line}: {message}" for line, message in sorted(problems)]
 
 
 def _import_allowed(module: str) -> bool:
+    if _module_forbidden(module):
+        return False
     if module in ALLOWED_HARNESS_IMPORTS:
         return True
     top = module.split(".", 1)[0]
@@ -127,7 +197,13 @@ def load_strategy_class(module_name: str, package: str = "strategies") -> type[S
         raise StrategyLoadError(
             f"{qualified} must define exactly one Strategy subclass, found {len(classes)}"
         )
-    return classes[0]
+    cls = classes[0]
+    if not (isinstance(cls.Params, type) and issubclass(cls.Params, Strategy.Params)):
+        raise StrategyLoadError(
+            f"{qualified}: {cls.__name__}.Params must subclass Strategy.Params, which makes "
+            "params immutable and rejects unknown preset keys"
+        )
+    return cls
 
 
 def build_strategy(recipe: Recipe) -> Strategy:
@@ -164,6 +240,21 @@ def _git_commit(root: Path) -> str | None:
     return f"{head}-dirty" if dirty else head
 
 
+def _reserve_run_dir(out: Path, run_id: str) -> Path:
+    """Create and return a new, empty run folder: `run_id`, or `run_id-2`, `-3`, ... if
+    that name is taken. Creating it is what reserves the name."""
+    out.mkdir(parents=True, exist_ok=True)
+    suffix = 1
+    while True:
+        run_dir = out / (run_id if suffix == 1 else f"{run_id}-{suffix}")
+        try:
+            run_dir.mkdir()
+        except FileExistsError:
+            suffix += 1
+        else:
+            return run_dir
+
+
 def run_backtest(
     recipe: Recipe,
     *,
@@ -182,8 +273,28 @@ def run_backtest(
     strategy = build_strategy(recipe)  # fails before any data is touched
     started = now().astimezone(dt.UTC)
     timestamp = started.strftime("%Y%m%dT%H%M%SZ")
-    run_id = f"{timestamp}_{recipe.strategy.name}"
-    commit = git_commit()
+    out = recipe.backtest.output_dir
+    # Reserved before the holdout log is written, so the logged run_id is always the
+    # name of this run's folder (two runs in the same second get different folders).
+    run_dir = _reserve_run_dir(out, f"{timestamp}_{recipe.strategy.name}")
+    try:
+        return _run_reserved(recipe, strategy, run_dir, started, holdout, loader, git_commit())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            run_dir.rmdir()  # only removes it if nothing was written
+        raise
+
+
+def _run_reserved(
+    recipe: Recipe,
+    strategy: Strategy,
+    run_dir: Path,
+    started: dt.datetime,
+    holdout: bool,
+    loader: DataLoader | None,
+    commit: str | None,
+) -> dict[str, Any]:
+    run_id = run_dir.name
     access = (
         HoldoutAccess(run_id=run_id, strategy=recipe.strategy.name, git_commit=commit)
         if holdout
@@ -211,14 +322,8 @@ def run_backtest(
     )
     benchmark = run_benchmark(panel, recipe, trade_from)
 
-    out = recipe.backtest.output_dir
-    run_dir = out / run_id
-    suffix = 1
-    while run_dir.exists():
-        suffix += 1
-        run_dir = out / f"{run_id}-{suffix}"
     run_info = {
-        "run_id": run_dir.name,
+        "run_id": run_id,
         "timestamp_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "strategy": result.strategy,
         "strategy_class": f"{type(strategy).__module__}.{type(strategy).__qualname__}",
@@ -229,7 +334,7 @@ def run_backtest(
         "python": sys.version.split()[0],
     }
     summary = write_run(run_dir, result, benchmark, recipe, holdout=holdout, run_info=run_info)
-    append_index(out / "index.csv", summary, run_info["timestamp_utc"], run_dir)
+    append_index(run_dir.parent / "index.csv", summary, run_info["timestamp_utc"], run_dir)
     return {**summary, "run_dir": str(run_dir)}
 
 

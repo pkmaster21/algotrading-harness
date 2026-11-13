@@ -33,13 +33,23 @@ class Strategy(ABC):
     """
 
     class Params(FrozenModel):
-        """No parameters. Subclasses override it with a subclass of `Strategy.Params`."""
+        """No parameters. Subclasses override it with a subclass of `Strategy.Params`.
+
+        Any other class is rejected (when the strategy is loaded and when it is built):
+        `Strategy.Params` is what makes params immutable and turns a misspelled preset
+        key into an error instead of a silently ignored value.
+        """
 
     #: Name used in reports. Defaults to the module name (e.g. "example_buy_and_hold").
     name: ClassVar[str] = ""
 
     def __init__(self, params: FrozenModel | None = None) -> None:
         params_cls = type(self).Params
+        if not (isinstance(params_cls, type) and issubclass(params_cls, Strategy.Params)):
+            raise TypeError(
+                f"{type(self).__name__}.Params must subclass Strategy.Params "
+                "(frozen, unknown fields rejected), not a plain pydantic model"
+            )
         if params is None:
             params = params_cls()
         if not isinstance(params, params_cls):

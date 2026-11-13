@@ -12,6 +12,9 @@ Each session has two phases:
 dates against any cutoff: it runs whatever panel the data loader produced, which is where
 the holdout boundary is enforced. It reads no clock, uses no randomness, and never
 iterates over a set, so identical inputs give identical results.
+
+Every call into strategy code (`on_start`, `on_bar`) runs inside `harness.guard`, which
+rejects file opens, network use, and process starts for the duration of the call.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from harness.broker.base import Broker
 from harness.config import ConstructionConfig, CostConfig
 from harness.construction import build_orders
 from harness.data import BarPanel
+from harness.guard import strategy_code
 from harness.models import (
     EngineEvent,
     EventKind,
@@ -102,7 +106,8 @@ class Engine:
         self.updates: list[OrderUpdate] = []
         self.events: list[EngineEvent] = []
         self.equity: list[EquityPoint] = []
-        strategy.on_start(self.universe)
+        with strategy_code():
+            strategy.on_start(self.universe)
 
     # ------------------------------------------------------------------ phases
 
@@ -123,7 +128,9 @@ class Engine:
             return
         snapshot = self._mark(session)
         view = self._buffer.view()
-        signals = self._validated(self.strategy.on_bar(view, snapshot), session)
+        with strategy_code():  # no file or network access from strategy code
+            emitted = self.strategy.on_bar(view, snapshot)
+        signals = self._validated(emitted, session)
         result = build_orders(signals, snapshot, closes, self.construction, self.costs)
         self.events.extend(result.events)
         ids = self.broker.submit(result.orders)

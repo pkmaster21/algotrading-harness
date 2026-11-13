@@ -35,6 +35,7 @@ Backtest, paper, and live run this exact pipeline. Only the broker adapter chang
 | `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models | 1 |
 | `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff | 1 |
 | `harness/view.py` | Append-only bar buffer and the read-only `MarketView` strategies receive | 1 |
+| `harness/guard.py` | Runtime guard: rejects file opens, network use, and process starts while strategy code runs | 1 |
 | `strategies/base.py` | `Strategy` interface; each strategy declares a pydantic `Params` class and receives it in its constructor | 1 |
 | `strategies/*.py` | Emit entry and exit signals from a read-only view of past bars | 1+ |
 | `harness/costs.py` | Estimate trade cost (flat % now) | 1 |
@@ -173,6 +174,14 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   anything outside an allowlist (numeric libraries, `harness.models`, `harness.view`,
   `strategies.base`). Catches accidental file, env, network, or broker access. Test
   strategies are loaded directly by tests and are not subject to it.
+- **Allowlist hardened after the slice 1 review (2026-11-12):** the allowed libraries do
+  their own I/O (`pd.read_parquet` on the bar cache would bypass the holdout cutoff), so the
+  check also rejects I/O names (`read_*`, `load`, `savetxt`, `to_csv`, ...) as
+  attributes or imports, plus `open`, `sys`, `os`, `__builtins__`, and `pydantic.v1` in any
+  position. A runtime audit hook (`harness/guard.py`) backs it up: while the engine is
+  inside `on_start` or `on_bar`, file opens outside the Python install, all network
+  events, and process starts raise. Still not a sandbox: native-code I/O (pyarrow) is invisible to the hook,
+  so for parquet the static check is the only layer.
 - **Cache consistency via overlap check plus scheduled refresh:** when extending a symbol's
   cache, the loader refetches the last few cached bars and compares them. Any split or
   dividend after the cached end rescales those bars, so a mismatch triggers a full refetch

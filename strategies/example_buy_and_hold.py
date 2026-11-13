@@ -13,6 +13,9 @@ Rules every strategy follows:
   without calling `on_bar`, so accumulated state would be missing those sessions.
 - Import only numpy, pandas, math and similar, plus `harness.models`, `harness.view`,
   and `strategies.base`. The run entry point rejects anything else.
+- Never read or write files or use the network (`open`, `pd.read_csv`, `np.load`,
+  `df.to_csv`, ...). All data comes from `view`. Such names are rejected when the
+  strategy is loaded, and the access itself is blocked while `on_bar` runs.
 """
 
 from __future__ import annotations
