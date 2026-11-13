@@ -59,8 +59,9 @@ re-validated through backtest and paper trading.
 
 ## Boundaries and ownership
 
-- **`harness/` is locked** after it's built: Claude Code settings deny edits.
-  Changes are deliberate and reviewed. Locked means reviewed, not frozen. Code belongs in
+- **`harness/` is not locked yet.** Until it stabilizes, every change to it goes through
+  PR review. Once it stabilizes it will be locked: Claude Code settings will deny edits, so
+  changes stay deliberate and reviewed. Locked means reviewed, not frozen. Code belongs in
   `harness/` when a bug in it would silently break every strategy or run.
 - **`strategies/` is the sandbox:** the only place AI-written code lands day to day.
 - **Keys live only in `.env`.** Only the data loader and broker adapters read them.
@@ -180,8 +181,8 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   attributes or imports, plus `open`, `sys`, `os`, `__builtins__`, and `pydantic.v1` in any
   position. A runtime audit hook (`harness/guard.py`) backs it up: while the engine is
   inside `on_start` or `on_bar`, file opens outside the Python install, all network
-  events, and process starts raise. Still not a sandbox: native-code I/O (pyarrow) is invisible to the hook,
-  so for parquet the static check is the only layer.
+  events, and process starts raise. Still not a sandbox: native-code I/O (pyarrow) is
+  invisible to the hook, so for parquet the static check is the only layer.
 - **Cache consistency via overlap check plus scheduled refresh:** when extending a symbol's
   cache, the loader refetches the last few cached bars and compares them. Any split or
   dividend after the cached end rescales those bars, so a mismatch triggers a full refetch
@@ -252,3 +253,18 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
 - How AlpacaBroker handles a forced close in slice 2: the base `Broker.force_close` is a
   sim concept; a real broker reports delistings itself, so this likely becomes reconciliation.
 - A trading halt longer than N sessions also triggers a forced close. Rare; N is configurable.
+- The position cap can be exceeded when an exit is canceled at the next open. Construction
+  counts today's exits as freed slots; if the exit then gets no bar (`no_bar`), the
+  position stays and the replacement entry still fills with whatever cash is left, giving
+  `max_positions + 1` holdings (the extra one is small). Belongs in the slice 2 risk
+  manager, which sees positions at fill time.
+- Vendor adjustment lag: the overlap check compares the last `overlap_bars` cached bars.
+  If Alpaca applies a split or dividend adjustment more than that many sessions after the
+  ex-date, the check passes and the cache mixes scales until the scheduled full refresh
+  (30 days). Not observed; depends on how late Alpaca adjusts.
+- Module-level or class-level state in a strategy persists across runs in one process, so
+  two identical runs can differ if a strategy keeps state outside its instance. Each CLI
+  run is a new process, so this starts to matter with the slice 3 backend.
+- Tickers that YAML reads as booleans (`ON`, `NO`, `TRUE`, ...) must be quoted in universe
+  files, for example `symbols: [SPY, "ON"]`. Unquoted, the loader fails with a ConfigError
+  (loud, not silent). Open: keep the quoting rule, or have the loader accept them.
