@@ -1,8 +1,8 @@
 """The Broker interface: the only path from Orders to Fills.
 
-SimBroker implements it for backtests; AlpacaBroker will implement it for paper and live
-trading in slice 2. The engine talks only to this interface, so backtest and live share
-one code path.
+SimBroker implements it for backtests; the order manager will implement it for paper
+trading in slice 2. The engine talks only to this interface, so backtest and paper share
+the engine. What every implementation must do is pinned by `tests/broker_contract.py`.
 """
 
 from __future__ import annotations
@@ -34,6 +34,10 @@ class Broker(ABC):
         """Called by the engine at the start of every traded session, in date order.
         Not called for warm-up sessions.
 
+        Orders are day orders: when this returns, every order submitted before it has
+        reached a final state (filled, canceled, rejected or expired) and is reported
+        through `poll_updates`. Nothing carries over to a later session.
+
         SimBroker executes its queue here using only `opens` (this session's opening
         prices). A live adapter ignores it, because real fills come from the venue.
         """
@@ -54,7 +58,10 @@ class Broker(ABC):
 
     @abstractmethod
     def poll_updates(self) -> list[OrderUpdate]:
-        """Return and clear order updates since the last call, in execution order."""
+        """Return and clear order updates since the last call, in execution order.
+
+        An update's fills are the fills since the previous update for that order.
+        """
 
     @abstractmethod
     def account(self) -> AccountState:
