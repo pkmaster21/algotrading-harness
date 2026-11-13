@@ -165,7 +165,7 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
 - **Size at signal close, fill at next open:** orders are sized from `close_t` plus
   estimated slippage (the only price known at decision time) and fill at `open_{t+1}`
   plus slippage. A buy that no longer fits in cash after a gap is reduced to the
-  affordable share count (or canceled), so cash never goes negative.
+  affordable share count (or canceled), so a buy never takes cash negative.
 - **Look-ahead barrier is an append-only buffer:** strategies read a `MarketView` over a
   buffer the engine fills one session at a time. Future rows are absent (unwritten NaN),
   not hidden, and returned data is a copy. This stops buggy code, not deliberate in-process

@@ -183,3 +183,50 @@ def test_strategy_params_validated() -> None:
         BuyAndHold.from_params({"symbol": "AAPL", "extra": 1})
     with pytest.raises(TypeError):
         BuyAndHold(Recorder.Params())
+
+
+# --------------------------------------------------------------------------- snapshot isolation
+
+
+def test_strategy_mutating_its_snapshot_does_not_change_construction() -> None:
+    # Two slots, both filled. The strategy then drops a held symbol from the positions
+    # dict it was handed (without exiting it) and asks for a third position. Construction
+    # must still see both holdings and refuse the entry for lack of a slot.
+    class PopThenEnter(Strategy):
+        def on_bar(self, view, portfolio):  # type: ignore[no-untyped-def]
+            if view.n_bars == 1:
+                return [Signal.enter("AAA", 2.0), Signal.enter("BBB", 1.0)]
+            if view.n_bars == 5:
+                portfolio.positions.pop("AAA")
+                return [Signal.enter("CCC", 1.0)]
+            return []
+
+    symbols = ["AAA", "BBB", "CCC"]
+    cheap = [5.0] * 12  # CCC is cheap enough to buy with leftover cash
+    panel = make_panel(symbols, 12, opens={"CCC": cheap}, closes={"CCC": cheap})
+    result = simulate(
+        PopThenEnter(), panel, SimBroker(10_000, COSTS), symbols, construction(max_positions=2),
+        COSTS,
+    )  # fmt: skip
+    assert sorted(result.final_positions) == ["AAA", "BBB"]
+    assert max(p.n_positions for p in result.equity) == 2
+    assert ("entry_skipped_no_slot", "CCC", panel.dates[4]) in [
+        (e.kind, e.symbol, e.date) for e in result.events
+    ]
+
+
+def test_strategy_clearing_its_snapshot_cannot_cause_a_second_buy_of_a_held_symbol() -> None:
+    class ClearThenReenter(Strategy):
+        def on_bar(self, view, portfolio):  # type: ignore[no-untyped-def]
+            if view.n_bars == 1:
+                return [Signal.enter("AAPL", 1.0)]
+            if view.n_bars == 5:
+                portfolio.positions.clear()
+                return [Signal.enter("AAPL", 1.0)]
+            return []
+
+    panel, result = _sim(ClearThenReenter(), n=12)  # used to abort inside SimBroker
+    assert len(result.fills) == 1
+    assert ("entry_ignored_held", "AAPL", panel.dates[4]) in [
+        (e.kind, e.symbol, e.date) for e in result.events
+    ]
