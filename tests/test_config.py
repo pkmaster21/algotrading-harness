@@ -211,7 +211,7 @@ def test_recipe_without_a_risk_preset_has_no_risk_and_ignores_execution_yaml(
 @pytest.mark.parametrize(
     ("name", "values"),
     [
-        ("conservative", (0.20, 0.80, 0.02, 0.10)),
+        ("conservative", (0.22, 0.80, 0.02, 0.10)),
         ("balanced", (0.25, 1.00, 0.03, 0.15)),
         ("aggressive", (0.30, 1.00, 0.05, 0.25)),
     ],
@@ -259,6 +259,42 @@ def test_bad_risk_values_rejected(
     path.write_text(text.replace(line, replacement))
     with pytest.raises(ConfigError, match=match):
         load_recipe("test-preset", "plumbing-10", config_copy, risk="balanced")
+
+
+def _set(path: Path, old: str, new: str) -> None:
+    text = path.read_text()
+    assert old in text
+    path.write_text(text.replace(old, new))
+
+
+def test_risk_preset_too_tight_for_one_equal_weight_position_is_an_error(
+    config_copy: Path,
+) -> None:
+    # 5 positions means 20% each; at the worst-case entry price (2% above the close)
+    # that is 20.4% of equity, so a 20% position limit would shrink every entry.
+    preset = config_copy / "risk" / "balanced.yaml"
+    _set(preset, "max_position_pct: 0.25", "max_position_pct: 0.20")
+    with pytest.raises(ConfigError) as exc:
+        load_recipe("test-preset", "plumbing-10", config_copy, risk="balanced")
+    message = str(exc.value)
+    assert "max_position_pct 0.2 is too small for max_positions 5" in message
+    assert "at least 0.2040" in message
+
+    _set(preset, "max_position_pct: 0.20", "max_position_pct: 0.204")  # exactly enough
+    load_recipe("test-preset", "plumbing-10", config_copy, risk="balanced")
+
+    _set(preset, "max_position_pct: 0.204", "max_position_pct: 0.20")
+    _set(config_copy / "construction.yaml", "max_positions: 5", "max_positions: 6")
+    load_recipe("test-preset", "plumbing-10", config_copy, risk="balanced")  # 1/6 fits
+
+
+def test_risk_fit_uses_the_larger_of_slippage_and_the_entry_limit(config_copy: Path) -> None:
+    _set(config_copy / "risk" / "balanced.yaml", "max_position_pct: 0.25", "max_position_pct: 0.21")
+    load_recipe("test-preset", "plumbing-10", config_copy, risk="balanced")
+    _set(config_copy / "costs.yaml", "slippage_bps: 5.0", "slippage_bps: 600.0")  # 6% per side
+    with pytest.raises(ConfigError, match="at least 0.2120"):
+        load_recipe("test-preset", "plumbing-10", config_copy, risk="balanced")
+    load(config_copy)  # no risk preset: nothing to check
 
 
 def test_risk_and_limits_are_set_together() -> None:

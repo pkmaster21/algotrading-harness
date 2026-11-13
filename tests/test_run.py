@@ -288,8 +288,8 @@ def test_cli_reports_missing_keys_without_a_traceback(
 
     config = tmp_config(tmp_path)
 
-    def fake_load_recipe(strategy: str, universe: str):  # type: ignore[no-untyped-def]
-        return load_recipe(strategy, "test-3", config)
+    def fake_load_recipe(strategy: str, universe: str, risk: str | None = None):  # type: ignore[no-untyped-def]
+        return load_recipe(strategy, "test-3", config, risk=risk)
 
     def fake_run(recipe, holdout=False):  # type: ignore[no-untyped-def]
         raise DataError("ALPACA_PAPER_API_KEY and ALPACA_PAPER_SECRET_KEY must be set")
@@ -351,3 +351,32 @@ def test_snapshot_records_strategy_source_hash(tmp_path: Path) -> None:
     snap = yaml.safe_load((Path(summary["run_dir"]) / "config_snapshot.yaml").read_text())
     expected = hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
     assert snap["run"]["strategy_source_sha256"] == expected
+
+
+# --------------------------------------------------------------------------- risk preset
+
+
+def test_run_with_a_risk_preset_is_labeled_and_enforced(tmp_path: Path) -> None:
+    config = tmp_config(tmp_path)
+    plain = _run(config)
+    assert plain["risk_preset"] == "none"
+
+    # A tight preset that still has room for the single 20% position this strategy holds.
+    preset = config / "risk" / "balanced.yaml"
+    preset.write_text(
+        preset.read_text()
+        .replace("max_position_pct: 0.25", "max_position_pct: 0.21")
+        .replace("max_exposure_pct: 1.00", "max_exposure_pct: 0.21")
+    )
+    risky = load_recipe("example_buy_and_hold", "test-3", config, risk="balanced")
+    summary = run_backtest(risky, loader=_loader(config), now=lambda: NOW, git_commit=lambda: None)
+    assert summary["risk_preset"] == "balanced"
+    run_dir = Path(summary["run_dir"])
+    rows = list(csv.DictReader((run_dir.parent / "index.csv").read_text().splitlines()))
+    assert [r["risk_preset"] for r in rows] == ["none", "balanced"]
+    snapshot = (run_dir / "config_snapshot.yaml").read_text()
+    assert "max_exposure_pct: 0.21" in snapshot and "max_order_notional" in snapshot
+    # Buy-and-hold of one symbol at 20% fits under both limits: same result as no risk.
+    assert summary["total_return"] == plain["total_return"]
+    # The benchmark is never risk-limited: it holds 100% SPY either way.
+    assert summary["benchmark"] == plain["benchmark"]

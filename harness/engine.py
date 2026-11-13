@@ -6,7 +6,8 @@ Each session has two phases:
   open. The engine records the resulting fills and cancellations.
 - **Close:** the engine appends this session's bars to the strategy's view, force-closes
   positions in symbols that stopped trading, marks the portfolio to market, asks the
-  strategy for signals, turns them into orders through construction, and submits them.
+  strategy for signals, turns them into orders through construction, passes them through
+  the risk manager (if the run has one), and submits what is left.
 
 Sessions before the first traded one go through `warm_up` instead: their bars enter the
 view and nothing else happens. Everything the engine keeps between sessions about the
@@ -49,6 +50,7 @@ from harness.models import (
     Signal,
     Stock,
 )
+from harness.risk import RiskManager
 from harness.view import PRICE_FIELDS, BarBuffer
 from strategies.base import Strategy
 
@@ -97,9 +99,11 @@ class Engine:
         construction: ConstructionConfig,
         costs: CostConfig,
         capacity: int,
+        risk: RiskManager | None = None,
     ) -> None:
         self.strategy = strategy
         self.broker = broker
+        self.risk = risk  # None: orders go from construction to the broker unchecked
         self.universe = tuple(universe)
         self.construction = construction
         self.costs = costs
@@ -134,6 +138,8 @@ class Engine:
         closes = self._update_closes(session, row["close"])
         self._force_close_stale(session)
         snapshot = self._mark(session)
+        if self.risk is not None:
+            self.events.extend(self.risk.on_mark(session, snapshot.equity))
         view = self._buffer.view()
         # The strategy gets its own deep copy: the snapshot's positions dict is mutable, and
         # construction below must size and count slots from what the broker reported, not
@@ -143,8 +149,15 @@ class Engine:
         signals = self._validated(emitted, session)
         result = build_orders(signals, snapshot, closes, self.construction, self.costs)
         self.events.extend(result.events)
-        ids = self.broker.submit(result.orders)
-        for order_id, order in zip(ids, result.orders, strict=True):
+        orders = result.orders
+        if self.risk is not None:
+            # Judged against the engine's own snapshot (what the broker reported), with
+            # the closes positions are marked at. Risk can only shrink or drop orders.
+            review = self.risk.review(orders, snapshot, self._last_close)
+            self.events.extend(review.events)
+            orders = review.orders
+        ids = self.broker.submit(orders)
+        for order_id, order in zip(ids, orders, strict=True):
             self.orders[order_id] = order
 
     def finish(self, session: dt.date) -> None:
@@ -297,6 +310,7 @@ def simulate(
     construction: ConstructionConfig,
     costs: CostConfig,
     trade_from: int = 0,
+    risk: RiskManager | None = None,
 ) -> BacktestResult:
     """Run `strategy` over every session in `panel`.
 
@@ -311,7 +325,7 @@ def simulate(
     cols = [panel.column(s) for s in universe]
     fields = {f: panel.field(f)[:, cols] for f in PRICE_FIELDS}
     starting_cash = broker.account().cash
-    engine = Engine(strategy, broker, universe, construction, costs, panel.n_dates)
+    engine = Engine(strategy, broker, universe, construction, costs, panel.n_dates, risk)
     for i, session in enumerate(panel.dates):
         row = {f: fields[f][i] for f in PRICE_FIELDS}
         opens = {
