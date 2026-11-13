@@ -1,0 +1,196 @@
+date,kind,symbol,detail
+2024-01-30,exit_ignored_not_held,GOOGL,stray exit
+2024-01-31,entry_skipped_no_slot,SPY,strength=0.0
+2024-02-06,entry_skipped_no_slot,MSFT,strength=1.0
+2024-02-06,entry_skipped_no_slot,JPM,strength=0.0
+2024-02-08,exit_ignored_not_held,JPM,stray exit
+2024-02-09,exit_ignored_not_held,META,stray exit
+2024-02-09,entry_skipped_no_slot,XOM,strength=1.0
+2024-02-09,entry_skipped_no_slot,MSFT,strength=0.0
+2024-02-13,entry_skipped_no_slot,META,strength=0.0
+2024-02-15,entry_skipped_no_slot,GOOGL,strength=1.0
+2024-02-15,entry_skipped_no_slot,SPY,strength=0.0
+2024-02-16,entry_skipped_no_slot,JPM,strength=1.0
+2024-02-20,exit_ignored_not_held,XOM,stray exit
+2024-02-21,exit_ignored_not_held,JPM,stray exit
+2024-02-21,entry_skipped_no_slot,JPM,strength=0.0
+2024-02-22,exit_ignored_not_held,META,stray exit
+2024-02-23,order_reduced,AMZN,sim-000067: 21 of 22 shares
+2024-02-23,exit_ignored_not_held,GOOGL,stray exit
+2024-02-26,order_reduced,META,sim-000073: 19 of 20 shares
+2024-02-26,exit_ignored_not_held,AMZN,stray exit
+2024-02-27,exit_ignored_not_held,NVDA,stray exit
+2024-02-27,entry_skipped_no_slot,AMZN,strength=0.0
+2024-02-28,exit_ignored_not_held,MSFT,stray exit
+2024-02-28,entry_skipped_no_slot,META,strength=0.0
+2024-02-29,order_reduced,JPM,sim-000087: 17 of 18 shares
+2024-02-29,exit_ignored_not_held,AAPL,stray exit
+2024-03-01,exit_ignored_not_held,QQQ,stray exit
+2024-03-04,exit_ignored_not_held,SPY,stray exit
+2024-03-04,exit_ignored_not_held,XOM,stray exit
+2024-03-04,entry_skipped_no_slot,AAPL,strength=0.0
+2024-03-05,entry_skipped_no_slot,NVDA,strength=0.0
+2024-03-06,exit_ignored_not_held,META,stray exit
+2024-03-07,entry_skipped_no_slot,MSFT,strength=1.0
+2024-03-08,exit_ignored_not_held,AMZN,stray exit
+2024-03-08,entry_skipped_no_slot,AMZN,strength=1.0
+2024-03-11,entry_skipped_no_slot,QQQ,strength=0.0
+2024-03-12,exit_ignored_not_held,MSFT,stray exit
+2024-03-13,exit_ignored_not_held,AAPL,stray exit
+2024-03-14,order_reduced,AMZN,sim-000127: 20 of 22 shares
+2024-03-15,exit_ignored_not_held,SPY,stray exit
+2024-03-15,exit_ignored_not_held,XOM,stray exit
+2024-03-20,entry_skipped_no_slot,NVDA,strength=0.0
+2024-03-22,exit_ignored_not_held,NVDA,stray exit
+2024-03-25,order_reduced,JPM,sim-000161: 17 of 18 shares
+2024-03-26,exit_ignored_not_held,AAPL,stray exit
+2024-03-27,order_reduced,QQQ,sim-000171: 36 of 37 shares
+2024-03-27,entry_skipped_no_slot,MSFT,strength=0.0
+2024-03-28,exit_ignored_not_held,SPY,stray exit
+2024-04-02,order_reduced,XOM,sim-000191: 15 of 16 shares
+2024-04-02,entry_skipped_no_slot,SPY,strength=0.0
+2024-04-04,order_reduced,AAPL,sim-000201: 34 of 35 shares
+2024-04-08,entry_skipped_no_slot,MSFT,strength=1.0
+2024-04-08,entry_skipped_no_slot,JPM,strength=0.0
+2024-04-09,order_canceled,NVDA,sim-000212: no_bar
+2024-04-10,exit_ignored_not_held,XOM,stray exit
+2024-04-11,entry_skipped_no_slot,XOM,strength=1.0
+2024-04-11,entry_skipped_no_slot,MSFT,strength=0.0
+2024-04-12,order_reduced,NVDA,sim-000224: 27 of 28 shares
+2024-04-12,exit_ignored_not_held,META,stray exit
+2024-04-15,order_reduced,AMZN,sim-000228: 23 of 24 shares
+2024-04-15,exit_ignored_not_held,GOOGL,stray exit
+2024-04-15,entry_skipped_no_slot,META,strength=0.0
+2024-04-16,exit_ignored_not_held,AMZN,stray exit
+2024-04-17,exit_ignored_not_held,NVDA,stray exit
+2024-04-17,entry_skipped_no_slot,GOOGL,strength=1.0
+2024-04-17,entry_skipped_no_slot,SPY,strength=0.0
+2024-04-18,exit_ignored_not_held,MSFT,stray exit
+2024-04-18,entry_skipped_no_slot,JPM,strength=1.0
+2024-04-19,exit_ignored_not_held,AAPL,stray exit
+2024-04-22,exit_ignored_not_held,QQQ,stray exit
+2024-04-23,exit_ignored_not_held,SPY,stray exit
+2024-04-23,exit_ignored_not_held,XOM,stray exit
+2024-04-23,entry_skipped_no_slot,JPM,strength=0.0
+2024-04-24,exit_ignored_not_held,JPM,stray exit
+2024-04-25,order_reduced,AMZN,sim-000260: 23 of 25 shares
+2024-04-25,exit_ignored_not_held,META,stray exit
+2024-04-26,exit_ignored_not_held,GOOGL,stray exit
+2024-04-29,exit_ignored_not_held,AMZN,stray exit
+2024-04-29,entry_skipped_no_slot,AMZN,strength=0.0
+2024-04-30,exit_ignored_not_held,NVDA,stray exit
+2024-04-30,entry_skipped_no_slot,META,strength=0.0
+2024-05-02,exit_ignored_not_held,AAPL,stray exit
+2024-05-03,entry_skipped_no_slot,AAPL,strength=0.0
+2024-05-06,exit_ignored_not_held,SPY,stray exit
+2024-05-06,entry_skipped_no_slot,NVDA,strength=0.0
+2024-05-08,entry_skipped_no_slot,MSFT,strength=1.0
+2024-05-09,entry_skipped_no_slot,AMZN,strength=1.0
+2024-05-10,exit_ignored_not_held,AMZN,stray exit
+2024-05-10,entry_skipped_no_slot,QQQ,strength=0.0
+2024-05-15,exit_ignored_not_held,AAPL,stray exit
+2024-05-17,exit_ignored_not_held,SPY,stray exit
+2024-05-21,entry_skipped_no_slot,NVDA,strength=0.0
+2024-05-22,order_reduced,AMZN,sim-000344: 28 of 30 shares
+2024-05-28,entry_skipped_no_slot,MSFT,strength=0.0
+2024-05-30,exit_ignored_not_held,XOM,stray exit
+2024-05-31,exit_ignored_not_held,JPM,stray exit
+2024-06-03,exit_ignored_not_held,META,stray exit
+2024-06-03,entry_skipped_no_slot,SPY,strength=0.0
+2024-06-04,order_reduced,QQQ,sim-000388: 47 of 49 shares
+2024-06-04,exit_ignored_not_held,GOOGL,stray exit
+2024-06-05,exit_ignored_not_held,AMZN,stray exit
+2024-06-06,exit_ignored_not_held,NVDA,stray exit
+2024-06-07,exit_ignored_not_held,MSFT,stray exit
+2024-06-07,entry_skipped_no_slot,MSFT,strength=1.0
+2024-06-07,entry_skipped_no_slot,JPM,strength=0.0
+2024-06-10,order_reduced,XOM,sim-000406: 21 of 23 shares
+2024-06-10,exit_ignored_not_held,AAPL,stray exit
+2024-06-11,exit_ignored_not_held,QQQ,stray exit
+2024-06-12,order_reduced,QQQ,sim-000416: 56 of 57 shares
+2024-06-12,exit_ignored_not_held,SPY,stray exit
+2024-06-12,exit_ignored_not_held,XOM,stray exit
+2024-06-12,entry_skipped_no_slot,XOM,strength=1.0
+2024-06-12,entry_skipped_no_slot,MSFT,strength=0.0
+2024-06-14,order_reduced,AMZN,sim-000422: 32 of 33 shares
+2024-06-14,exit_ignored_not_held,META,stray exit
+2024-06-14,entry_skipped_no_slot,META,strength=0.0
+2024-06-17,exit_ignored_not_held,GOOGL,stray exit
+2024-06-18,entry_skipped_no_slot,GOOGL,strength=1.0
+2024-06-18,entry_skipped_no_slot,SPY,strength=0.0
+2024-06-19,exit_ignored_not_held,NVDA,stray exit
+2024-06-19,entry_skipped_no_slot,JPM,strength=1.0
+2024-06-21,exit_ignored_not_held,AAPL,stray exit
+2024-06-24,entry_skipped_no_slot,JPM,strength=0.0
+2024-06-25,exit_ignored_not_held,SPY,stray exit
+2024-06-26,exit_ignored_not_held,JPM,stray exit
+2024-06-28,exit_ignored_not_held,GOOGL,stray exit
+2024-06-28,entry_skipped_no_slot,AMZN,strength=0.0
+2024-07-01,exit_ignored_not_held,AMZN,stray exit
+2024-07-01,entry_skipped_no_slot,META,strength=0.0
+2024-07-02,exit_ignored_not_held,NVDA,stray exit
+2024-07-04,exit_ignored_not_held,AAPL,stray exit
+2024-07-04,entry_skipped_no_slot,AAPL,strength=0.0
+2024-07-05,entry_skipped_no_slot,NVDA,strength=0.0
+2024-07-09,entry_skipped_no_slot,MSFT,strength=1.0
+2024-07-10,entry_skipped_no_slot,AMZN,strength=1.0
+2024-07-11,entry_skipped_no_slot,QQQ,strength=0.0
+2024-07-12,exit_ignored_not_held,AMZN,stray exit
+2024-07-19,exit_ignored_not_held,XOM,stray exit
+2024-07-22,exit_ignored_not_held,JPM,stray exit
+2024-07-22,entry_skipped_no_slot,NVDA,strength=0.0
+2024-07-23,exit_ignored_not_held,META,stray exit
+2024-07-24,order_reduced,QQQ,sim-000542: 58 of 59 shares
+2024-07-24,exit_ignored_not_held,GOOGL,stray exit
+2024-07-25,exit_ignored_not_held,AMZN,stray exit
+2024-07-26,exit_ignored_not_held,NVDA,stray exit
+2024-07-29,exit_ignored_not_held,MSFT,stray exit
+2024-07-29,entry_skipped_no_slot,MSFT,strength=0.0
+2024-07-30,order_reduced,XOM,sim-000562: 29 of 31 shares
+2024-07-30,exit_ignored_not_held,AAPL,stray exit
+2024-07-31,order_canceled,QQQ,sim-000563: no_bar
+2024-08-01,order_canceled,JPM,sim-000570: no_bar
+2024-08-01,exit_ignored_not_held,SPY,stray exit
+2024-08-01,exit_ignored_not_held,XOM,stray exit
+2024-08-01,entry_skipped_no_slot,NVDA,strength=1.0
+2024-08-01,entry_skipped_no_slot,XOM,strength=0.0
+2024-08-05,order_reduced,SPY,sim-000578: 68 of 69 shares
+2024-08-05,position_closed_no_data,JPM,sim-000579: no bar for 5 sessions; closed at 2024-07-29 close
+2024-08-05,position_closed_no_data,QQQ,sim-000580: no bar for 5 sessions; closed at 2024-07-29 close
+2024-08-06,exit_ignored_not_held,GOOGL,stray exit
+2024-08-09,exit_ignored_not_held,MSFT,stray exit
+2024-08-12,exit_ignored_not_held,AAPL,stray exit
+2024-08-13,exit_ignored_not_held,QQQ,stray exit
+2024-08-14,exit_ignored_not_held,SPY,stray exit
+2024-08-15,exit_ignored_not_held,JPM,stray exit
+2024-08-19,exit_ignored_not_held,GOOGL,stray exit
+2024-08-21,exit_ignored_not_held,NVDA,stray exit
+2024-08-22,exit_ignored_not_held,MSFT,stray exit
+2024-08-26,exit_ignored_not_held,QQQ,stray exit
+2024-08-28,exit_ignored_not_held,JPM,stray exit
+2024-08-30,order_reduced,AMZN,sim-000644: 41 of 44 shares
+2024-09-04,exit_ignored_not_held,MSFT,stray exit
+2024-09-06,exit_ignored_not_held,QQQ,stray exit
+2024-09-09,exit_ignored_not_held,XOM,stray exit
+2024-09-10,exit_ignored_not_held,JPM,stray exit
+2024-09-11,order_reduced,AMZN,sim-000672: 49 of 50 shares
+2024-09-11,exit_ignored_not_held,META,stray exit
+2024-09-12,exit_ignored_not_held,GOOGL,stray exit
+2024-09-13,exit_ignored_not_held,AMZN,stray exit
+2024-09-16,exit_ignored_not_held,NVDA,stray exit
+2024-09-17,exit_ignored_not_held,MSFT,stray exit
+2024-09-18,exit_ignored_not_held,AAPL,stray exit
+2024-09-19,exit_ignored_not_held,QQQ,stray exit
+2024-09-20,exit_ignored_not_held,SPY,stray exit
+2024-09-20,entry_skipped_no_slot,NVDA,strength=0.0
+2024-09-23,exit_ignored_not_held,JPM,stray exit
+2024-09-25,exit_ignored_not_held,GOOGL,stray exit
+2024-09-27,exit_ignored_not_held,NVDA,stray exit
+2024-09-30,exit_ignored_not_held,MSFT,stray exit
+2024-10-01,exit_ignored_not_held,AAPL,stray exit
+2024-10-02,exit_ignored_not_held,QQQ,stray exit
+2024-10-03,exit_ignored_not_held,SPY,stray exit
+2024-10-04,exit_ignored_not_held,JPM,stray exit
+2024-10-07,order_unfilled_end,SPY,sim-000736: end_of_data
+2024-10-07,order_unfilled_end,NVDA,sim-000737: end_of_data
+2024-10-07,order_unfilled_end,AMZN,sim-000738: end_of_data
