@@ -958,7 +958,7 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 11 | `feat(positions): journal, ledger, reconciliation` | `journal.py`, `positions.py` | |
 | 12 | `feat(killswitch): kill latch and alerts` | `killswitch.py`, `alerts.py` | |
 | 13 | `feat(orders): idempotent submission and recovery` | `OrderManager` core: staging, ids, protocol, `recover`, crash tests | `harness/` boundary |
-| 14 | `feat(orders): open workflow` | Exits, release with `review_release`, limit pricing, deadlines; contract suite now also runs against `OrderManager` | |
+| 14 | `feat(orders): open workflow` | Exits, release with `review_release`, limit pricing, deadlines; contract suite now also runs against `OrderManager`, with a partial-fill contract test added | |
 | 15 | `feat(orders): manual approval for entries` | Approval gate, inbox | |
 | 16 | `feat(broker): Alpaca paper adapter` | `alpaca.py`; every **(verify)** item checked against the docs first and recorded in the PR | Credentials, dependencies if alpaca-py needs a bump |
 | 17 | `feat(data): paper access path` | `PaperAccess`, paper access log | Holdout handling |
