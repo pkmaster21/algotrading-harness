@@ -22,6 +22,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from collections.abc import Mapping, Sequence
+from typing import assert_never
 
 import numpy as np
 from pydantic import Field
@@ -158,19 +159,40 @@ class Engine:
         for update in self.broker.poll_updates():
             self.updates.append(update)
             order = self.orders.get(update.order_id)
-            symbol = order.symbol if order is not None else update.fills[0].instrument.key
-            if update.status == "canceled":
-                kind: EventKind = (
-                    "order_unfilled_end" if update.reason == "end_of_data" else "order_canceled"
+            if order is not None:
+                symbol = order.symbol
+            elif update.fills:  # a forced close: the broker's own order, not one of ours
+                symbol = update.fills[0].instrument.key
+            else:
+                raise RuntimeError(
+                    f"broker reported {update.status} for unknown order {update.order_id}"
                 )
-                self._log(session, kind, symbol, f"{update.order_id}: {update.reason}")
-            elif update.reason == "reduced_for_cash":
-                filled = sum(f.quantity for f in update.fills)
-                ordered = order.quantity if order is not None else "?"
-                self._log(
-                    session, "order_reduced", symbol,
-                    f"{update.order_id}: {filled} of {ordered} shares",
-                )  # fmt: skip
+            filled = sum(f.quantity for f in update.fills)
+            ordered = order.quantity if order is not None else "?"
+            detail = f"{update.order_id}: {update.reason}"
+            match update.status:
+                case "canceled":
+                    kind: EventKind = (
+                        "order_unfilled_end" if update.reason == "end_of_data" else "order_canceled"
+                    )
+                    self._log(session, kind, symbol, detail)
+                case "rejected":
+                    self._log(session, "order_rejected", symbol, detail)
+                case "expired":
+                    self._log(session, "order_expired", symbol, detail)
+                case "partially_filled":
+                    self._log(
+                        session, "order_partial", symbol,
+                        f"{update.order_id}: {filled} of {ordered} shares in this update",
+                    )  # fmt: skip
+                case "filled":
+                    if update.reason == "reduced_for_cash":
+                        self._log(
+                            session, "order_reduced", symbol,
+                            f"{update.order_id}: {filled} of {ordered} shares",
+                        )  # fmt: skip
+                case _:
+                    assert_never(update.status)
 
     def _update_closes(self, session: dt.date, close_row: np.ndarray) -> dict[str, float]:
         closes: dict[str, float] = {}

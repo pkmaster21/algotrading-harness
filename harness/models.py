@@ -14,22 +14,34 @@ import datetime as dt
 import math
 import re
 from typing import Annotated, Literal, Self
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Side = Literal["buy", "sell"]
 Action = Literal["enter", "exit"]
 OptionRight = Literal["call", "put"]
-FillKind = Literal["next_open", "forced_close"]
-OrderStatus = Literal["filled", "canceled"]
+FillKind = Literal["next_open", "forced_close", "venue"]
+# "filled" and the last three are terminal. "partially_filled" is not: more updates follow.
+OrderStatus = Literal["partially_filled", "filled", "canceled", "rejected", "expired"]
 OrderUpdateReason = Literal[
     "",
+    # SimBroker
     "reduced_for_cash",
     "no_bar",
     "not_held",
     "insufficient_cash",
     "end_of_data",
     "no_data",
+    # live order management (slice 2); SimBroker never reports these
+    "limit_not_reached",
+    "broker_rejected",
+    "risk_rejected",
+    "approval_denied",
+    "approval_timeout",
+    "session_deadline",
+    "kill_switch",
+    "unknown_outcome",
 ]
 EventKind = Literal[
     "exit_ignored_not_held",
@@ -41,8 +53,13 @@ EventKind = Literal[
     "order_canceled",
     "order_reduced",
     "order_unfilled_end",
+    "order_partial",
+    "order_rejected",
+    "order_expired",
     "position_closed_no_data",
 ]
+
+MARKET_TZ = ZoneInfo("America/New_York")  # session dates are New York dates
 
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,15}$")
 _PRICE_TOLERANCE = 1e-6  # relative slack for OHLC containment (vendor rounding)
@@ -262,6 +279,13 @@ class Fill(FrozenModel):
       (the open of a session after the signal bar).
     - `forced_close`: a sell with fill_date == signal_date and price_date < signal_date
       (the last close of a symbol that stopped trading; stale, never future).
+    - `venue`: an execution reported by a real venue. Same date rules as `next_open`
+      (a later session than the signal), plus `filled_at`, the execution time, whose
+      New York date must be `fill_date`. `reference_price` is the close the order was
+      decided on and `slippage_cost` is 0: what the fill cost against the official open
+      is only known once that session's bar exists, and is computed in the report.
+
+    `filled_at` is set for `venue` fills only; simulated fills have no time of day.
     """
 
     order_id: str
@@ -276,16 +300,21 @@ class Fill(FrozenModel):
     price: float = Field(gt=0)
     slippage_cost: float = Field(ge=0)
     commission: float = Field(ge=0)
+    filled_at: dt.datetime | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Self:
-        if self.kind == "next_open":
+        if self.kind != "venue" and self.filled_at is not None:
+            raise ValueError("filled_at is only for venue fills")
+        if self.kind in ("next_open", "venue"):
             if self.price_date != self.fill_date:
-                raise ValueError("next_open fill must use the fill session's own open")
+                raise ValueError(f"{self.kind} fill must use the fill session's own price")
             if self.fill_date <= self.signal_date:
                 raise ValueError(
                     f"look-ahead: fill on {self.fill_date} for signal on {self.signal_date}"
                 )
+            if self.kind == "venue":
+                self._check_venue()
         else:
             if self.side != "sell":
                 raise ValueError("forced_close fills must be sells")
@@ -294,6 +323,17 @@ class Fill(FrozenModel):
             if self.price_date >= self.signal_date:
                 raise ValueError("forced_close must use a close from before the trigger session")
         return self
+
+    def _check_venue(self) -> None:
+        if self.filled_at is None or self.filled_at.utcoffset() is None:
+            raise ValueError("venue fill needs a timezone-aware filled_at")
+        if self.filled_at.astimezone(MARKET_TZ).date() != self.fill_date:
+            raise ValueError(
+                f"filled_at {self.filled_at.isoformat()} is not on fill_date {self.fill_date} "
+                "in New York"
+            )
+        if self.slippage_cost != 0:
+            raise ValueError("venue fills carry no slippage estimate (slippage_cost must be 0)")
 
     @property
     def notional(self) -> float:
@@ -308,7 +348,15 @@ class Fill(FrozenModel):
 
 
 class OrderUpdate(FrozenModel):
-    """Broker report on an order: filled (possibly reduced) or canceled, with a reason."""
+    """Broker report on an order, with a reason.
+
+    `fills` are incremental: the executions since the previous update for this order, so
+    an order's total is the sum over its updates. An order that fills in pieces reports
+    `partially_filled` updates (each with fills) and ends with `filled` (with the last
+    fills), or with `canceled` or `expired` (no fills) if the remainder never executes.
+    `rejected` means the order was never accepted. SimBroker reports one update per
+    order: `filled` (possibly reduced) or `canceled`.
+    """
 
     order_id: str
     status: OrderStatus
@@ -317,10 +365,11 @@ class OrderUpdate(FrozenModel):
 
     @model_validator(mode="after")
     def _check(self) -> Self:
-        if self.status == "filled" and not self.fills:
-            raise ValueError("a filled update needs at least one fill")
-        if self.status == "canceled" and self.fills:
-            raise ValueError("a canceled update has no fills")
+        if self.status in ("filled", "partially_filled"):
+            if not self.fills:
+                raise ValueError(f"a {self.status} update needs at least one fill")
+        elif self.fills:
+            raise ValueError(f"a {self.status} update has no fills")
         if any(f.order_id != self.order_id for f in self.fills):
             raise ValueError("fill order_id does not match update")
         return self
