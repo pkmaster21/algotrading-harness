@@ -953,7 +953,7 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 6 | `test(broker): shared Broker contract suite` | Contract tests, run against `SimBroker` | |
 | 7 | `feat(report): build round trips from multi-fill orders` | 0.4 | |
 | 8 | `feat(config): risk presets and execution settings` | `config/risk/*.yaml`, `config/execution.yaml`, models, `Recipe.risk` | Config boundary |
-| 9 | `feat(risk): hard limits` | `harness/risk.py`, engine hook, `risk: none` label | `harness/` boundary |
+| 9 | `feat(risk): hard limits` | `harness/risk.py`, engine hook, `risk: none` label; error (not a warning) at recipe load unless the preset leaves room for one equal-weight position (`max_position_pct` against `1 / max_positions` at the worst-case price), since the placeholder `conservative` preset does not | `harness/` boundary |
 | 10 | `feat(broker): venue protocol and fake venue` | `venue.py`, `tests/fake_venue.py`, `RateLimiter` move | |
 | 11 | `feat(positions): journal, ledger, reconciliation` | `journal.py`, `positions.py` | |
 | 12 | `feat(killswitch): kill latch and alerts` | `killswitch.py`, `alerts.py` | |
@@ -963,7 +963,7 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 16 | `feat(broker): Alpaca paper adapter` | `alpaca.py`; every **(verify)** item checked against the docs first and recorded in the PR | Credentials, dependencies if alpaca-py needs a bump |
 | 17 | `feat(data): paper access path` | `PaperAccess`, paper access log | Holdout handling |
 | 18 | `feat(profiles): frozen profiles and promotion` | `profiles.py`, restart-equivalence check, plumbing profile | |
-| 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests | |
+| 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests; the paper day's saved recipe records the whole `ExecutionConfig`, not only `limits` | |
 | 20 | `feat(service): status and control functions` | `service.py`; `ui-design.md` contract update | |
 | 21 | `test(paper): end-to-end against the fake venue` | Multi-day buy-and-hold with injected faults; operator runbook | |
 | 22 | End-to-end on the real paper account (run by you) | Checklist below; results recorded in `ARCHITECTURE.md` | Credentials |

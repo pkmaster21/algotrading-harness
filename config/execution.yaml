@@ -1,0 +1,15 @@
+# How approved orders reach the venue (paper trading). Fixed settings, changed through
+# review. Placeholder values, not yet chosen. Times are New York time and must be quoted.
+entry_limit_pct: 0.02            # entry limit price: the prior close plus this fraction
+approval_deadline: "09:20"       # entries not approved by now are canceled (manual approval mode)
+opg_cutoff: "09:25"              # exits go into the opening auction until now; later ones go as market orders
+exit_deadline: "09:40"           # an auction exit still unfilled now is re-sent as a market order
+session_deadline: "09:50"        # anything still working now is canceled
+poll_seconds: 5.0                # how often order status is checked
+max_submit_attempts: 3           # tries per order when the venue does not answer
+max_requests_per_minute: 150     # trading API calls; Alpaca allows 200
+cash_tolerance: 1.00             # dollars of cash difference reconciliation accepts with a warning
+max_clock_skew_seconds: 30.0     # local clock versus venue clock; more than this stops trading
+limits:                          # fat-finger limits; not risk appetite
+  max_order_notional: 5000.0     # dollars, per order
+  max_orders_per_session: 25     # venue orders, retries included

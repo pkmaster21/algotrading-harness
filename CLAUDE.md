@@ -54,7 +54,7 @@ config/       # YAML, read only by harness/config.py
   strategies/ #   strategy presets (params, rule templates); UI-editable; gitignored except example
   risk/       #   risk presets (conservative, balanced, aggressive)
   universe/   #   symbol lists
-  *.yaml      #   fixed settings: costs, construction, dates, data (not UI-editable)
+  *.yaml      #   fixed settings: costs, construction, dates, data, execution (not UI-editable)
 docs/         # detail docs (ui-design.md); entry-point docs stay at the root
 tests/        # pytest; test strategies (buy-and-hold, look-ahead cheater) live here
 data/         # local bar cache (gitignored)
