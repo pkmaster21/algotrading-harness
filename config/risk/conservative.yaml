@@ -1,5 +1,5 @@
 # Placeholder values, not yet chosen (ARCHITECTURE.md, open questions).
-max_position_pct: 0.20        # of equity, per position, at the worst-case price
+max_position_pct: 0.22        # of equity, per position, at the worst-case price
 max_exposure_pct: 0.80        # long market value / equity; 1.00 means fully invested, no leverage
 daily_loss_cap_pct: 0.02      # close-to-close loss that blocks the next session's entries
 max_drawdown_halt_pct: 0.10   # from peak equity; halts entries until an operator resets

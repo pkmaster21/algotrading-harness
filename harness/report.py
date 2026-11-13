@@ -259,7 +259,7 @@ def summarize(
     return {
         "strategy": result.strategy,
         "strategy_preset": recipe.strategy.name,
-        "risk_preset": "none",
+        "risk_preset": recipe.risk.name if recipe.risk is not None else "none",
         "universe": recipe.universe.name,
         "holdout": holdout,
         "start": result.start.isoformat(),

@@ -231,6 +231,19 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   `config/risk/`, and `config/universe/` hold named presets picked for each run. Costs,
   construction, dates, and data settings stay single files. A run names its presets; the
   loader resolves them.
+- **Risk sits between construction and the broker, and only makes orders smaller:** the
+  engine marks the portfolio, tells the risk manager the equity, and passes construction's
+  orders through it before the broker sees them. A sell of at most the held quantity
+  passes in every state. A buy is cut to what fits every limit, measured at the worst-case
+  entry price (close plus slippage in a backtest), or rejected. Without a risk preset the
+  engine skips the step and the run is labeled `risk: none`.
+- **The benchmark is never risk-limited:** it holds 100% SPY whatever preset the run uses,
+  so the comparison line stays the same across presets.
+- **A preset must fit construction, checked when the recipe loads:** `max_position_pct`
+  has to leave room for one equal-weight position (`1 / max_positions`) at the worst-case
+  entry price. A tighter preset is a config error, not a quiet shrink of every entry.
+- **Resetting a drawdown halt rebases the peak** to the last marked equity. Otherwise the
+  next session, still far below the old peak, would halt again at once.
 - **Risk presets hold risk appetite; `config/execution.yaml` holds everything else about
   sending orders:** a preset has four limits (position size, exposure, daily loss cap,
   drawdown halt), and exposure is capped at 1 by type, so leverage cannot be configured.
@@ -305,6 +318,10 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   position stays and the replacement entry still fills with whatever cash is left, giving
   `max_positions + 1` holdings (the extra one is small). Belongs in the slice 2 risk
   manager, which sees positions at fill time.
+- Deposits and withdrawals look like gains and losses to the risk manager: the daily loss
+  cap and the drawdown halt compare equity from one close to the next. A withdrawal could
+  trip them and a deposit could hide a real loss. Irrelevant until money moves in or out
+  of the account; then equity changes need to be net of cash flows.
 - Realized versus unrealized P&L in `trades.csv`: a position that is partly sold when the
   report is written is one open row, and its `pnl` mixes realized gains (shares sold) with
   unrealized ones (shares marked at the last close). Common in paper, where the report is

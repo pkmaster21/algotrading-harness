@@ -44,6 +44,7 @@ from harness.data import (
 )
 from harness.engine import simulate
 from harness.report import append_index, run_benchmark, write_run
+from harness.risk import RiskManager, RiskState
 from strategies.base import Strategy
 
 # Top-level modules a strategy may import, and harness modules it may import from.
@@ -255,6 +256,21 @@ def _reserve_run_dir(out: Path, run_id: str) -> Path:
             return run_dir
 
 
+def build_risk(recipe: Recipe) -> RiskManager | None:
+    """The risk manager for a backtest of `recipe`, or None if it names no risk preset.
+
+    Entries are judged at the price construction sized them at: the close plus slippage.
+    """
+    if recipe.risk is None or recipe.limits is None:
+        return None
+    return RiskManager(
+        recipe.risk,
+        recipe.limits,
+        entry_markup=recipe.costs.slippage_bps / 10_000,
+        state=RiskState.initial(recipe.backtest.starting_cash),
+    )
+
+
 def run_backtest(
     recipe: Recipe,
     *,
@@ -319,6 +335,7 @@ def _run_reserved(
         recipe.construction,
         recipe.costs,
         trade_from,
+        build_risk(recipe),
     )
     benchmark = run_benchmark(panel, recipe, trade_from)
 
@@ -348,11 +365,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--universe", default=DEFAULT_UNIVERSE, help=f"universe preset (default {DEFAULT_UNIVERSE})"
     )
     parser.add_argument(
+        "--risk", default=None, help="risk preset in config/risk/ (default: no risk limits)"
+    )
+    parser.add_argument(
         "--holdout", action="store_true", help="run on holdout data (logged in the holdout log)"
     )
     args = parser.parse_args(argv)
     try:
-        recipe = load_recipe(args.strategy, args.universe)
+        recipe = load_recipe(args.strategy, args.universe, risk=args.risk)
         summary = run_backtest(recipe, holdout=args.holdout)
     except USER_ERRORS as exc:
         print(f"error: {exc}", file=sys.stderr)

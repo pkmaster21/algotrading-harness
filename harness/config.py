@@ -313,10 +313,40 @@ def load_recipe(
         raw[section] = _read_yaml(config_dir / f"{section}.yaml")
     for section, keys in _PATH_FIELDS.items():
         raw[section] = _resolve_paths(raw[section], keys, config_dir.parent)
+    execution: ExecutionConfig | None = None
     if risk is not None:
+        execution = load_execution(config_dir)
         raw["risk"] = _read_preset(config_dir, "risk", risk)
-        raw["limits"] = load_execution(config_dir).limits
+        raw["limits"] = execution.limits
     try:
-        return Recipe.model_validate(raw)
+        recipe = Recipe.model_validate(raw)
     except ValidationError as exc:
         raise ConfigError(f"invalid config in {config_dir}:\n{exc}") from exc
+    if execution is not None:
+        _check_risk_fits(recipe, execution.entry_limit_pct)
+    return recipe
+
+
+def _check_risk_fits(recipe: Recipe, entry_limit_pct: float) -> None:
+    """A risk preset must leave room for one position at construction's size.
+
+    Construction targets `equity / max_positions` per position. Risk judges an entry at
+    its worst-case price: the close plus slippage in a backtest, the close plus the entry
+    limit in paper trading. A preset tighter than that would shrink every entry, which is
+    a mistake in the config, not a risk decision. The check uses the larger markup, so a
+    recipe that loads for a backtest also fits in paper.
+    """
+    risk = recipe.risk
+    if risk is None:
+        return
+    max_positions = recipe.construction.max_positions
+    markup = max(entry_limit_pct, recipe.costs.slippage_bps / 10_000)
+    needed = (1 / max_positions) * (1 + markup)
+    if risk.max_position_pct < needed - 1e-9:  # 0.204 must pass for 0.2 * 1.02
+        raise ConfigError(
+            f"risk preset {risk.name!r}: max_position_pct {risk.max_position_pct} is too "
+            f"small for max_positions {max_positions}. One equal-weight position is "
+            f"{1 / max_positions:.4f} of equity, or {needed:.4f} at the worst-case entry "
+            f"price ({markup:.2%} above the close). Raise max_position_pct to at least "
+            f"{needed:.4f}, or raise max_positions."
+        )

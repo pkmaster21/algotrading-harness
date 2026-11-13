@@ -958,13 +958,13 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 11 | `feat(positions): journal, ledger, reconciliation` | `journal.py`, `positions.py` | |
 | 12 | `feat(killswitch): kill latch and alerts` | `killswitch.py`, `alerts.py` | |
 | 13 | `feat(orders): idempotent submission and recovery` | `OrderManager` core: staging, ids, protocol, `recover`, crash tests | `harness/` boundary |
-| 14 | `feat(orders): open workflow` | Exits, release with `review_release`, limit pricing, deadlines; contract suite now also runs against `OrderManager`, with a partial-fill contract test added | |
+| 14 | `feat(orders): open workflow` | Exits, release with `review_release` (added to `risk.py` here, with its caller: actual cash, `no_leverage`, the `max_positions` cap), limit pricing, deadlines; contract suite now also runs against `OrderManager`, with a partial-fill contract test added | |
 | 15 | `feat(orders): manual approval for entries` | Approval gate, inbox | |
 | 16 | `feat(broker): Alpaca paper adapter` | `alpaca.py`; every **(verify)** item checked against the docs first and recorded in the PR | Credentials, dependencies if alpaca-py needs a bump |
 | 17 | `feat(data): paper access path` | `PaperAccess`, paper access log | Holdout handling |
-| 18 | `feat(profiles): frozen profiles and promotion` | `profiles.py`, restart-equivalence check, plumbing profile | |
-| 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests; the paper day's saved recipe records the whole `ExecutionConfig`, not only `limits` | |
-| 20 | `feat(service): status and control functions` | `service.py`; `ui-design.md` contract update | |
+| 18 | `feat(profiles): frozen profiles and promotion` | `profiles.py`, restart-equivalence check, plumbing profile; `RiskState` is seeded from the account's actual equity when a profile starts (not from starting cash) and saved between days | |
+| 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests; the paper day's saved recipe records the whole `ExecutionConfig`, not only `limits`; a `RiskStateError` on a rerun (the mark differs from the first attempt) is reported as "account changed since the first attempt, reconcile first", not as a traceback | |
+| 20 | `feat(service): status and control functions` | `service.py`; `ui-design.md` contract update; resetting a drawdown halt journals who reset it, why, and the old peak (the reset erases it from state) | |
 | 21 | `test(paper): end-to-end against the fake venue` | Multi-day buy-and-hold with injected faults; operator runbook | |
 | 22 | End-to-end on the real paper account (run by you) | Checklist below; results recorded in `ARCHITECTURE.md` | Credentials |
 
