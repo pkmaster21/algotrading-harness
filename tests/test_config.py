@@ -4,7 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from harness.config import ConfigError, Recipe, load_recipe
+from harness.config import (
+    ConfigError,
+    ExecutionConfig,
+    OrderLimits,
+    Recipe,
+    RiskConfig,
+    load_execution,
+    load_recipe,
+)
 
 REPO_CONFIG = Path(__file__).resolve().parent.parent / "config"
 
@@ -187,3 +195,144 @@ def test_non_json_param_rejected_so_saved_recipe_reloads_identically(config_copy
     preset.write_text("strategy: buy_and_hold\nparams: {start: '2020-01-01', w: [1, 2.5]}\n")
     recipe = load(config_copy)
     assert Recipe.model_validate_json(recipe.model_dump_json()) == recipe
+
+
+# --------------------------------------------------------------------------- risk presets
+
+
+def test_recipe_without_a_risk_preset_has_no_risk_and_ignores_execution_yaml(
+    config_copy: Path,
+) -> None:
+    (config_copy / "execution.yaml").unlink()  # plain backtests must not depend on it
+    recipe = load(config_copy)
+    assert recipe.risk is None and recipe.limits is None
+
+
+@pytest.mark.parametrize(
+    ("name", "values"),
+    [
+        ("conservative", (0.20, 0.80, 0.02, 0.10)),
+        ("balanced", (0.25, 1.00, 0.03, 0.15)),
+        ("aggressive", (0.30, 1.00, 0.05, 0.25)),
+    ],
+)
+def test_repo_risk_presets_load(config_copy: Path, name: str, values: tuple[float, ...]) -> None:
+    recipe = load_recipe("test-preset", "plumbing-10", config_copy, risk=name)
+    risk = recipe.risk
+    assert risk is not None and risk.name == name
+    assert (
+        risk.max_position_pct,
+        risk.max_exposure_pct,
+        risk.daily_loss_cap_pct,
+        risk.max_drawdown_halt_pct,
+    ) == values
+    # A run with a risk preset also carries the order limits it will be held to.
+    assert recipe.limits == load_execution(config_copy).limits
+    assert Recipe.model_validate(recipe.model_dump(mode="json")) == recipe
+
+
+def test_missing_or_unsafe_risk_preset_is_reported(config_copy: Path) -> None:
+    with pytest.raises(ConfigError, match="reckless.yaml"):
+        load_recipe("test-preset", "plumbing-10", config_copy, risk="reckless")
+    with pytest.raises(ConfigError, match="invalid preset name"):
+        load_recipe("test-preset", "plumbing-10", config_copy, risk="../balanced")
+
+
+@pytest.mark.parametrize(
+    ("line", "replacement", "match"),
+    [
+        ("max_exposure_pct: 1.00", "max_exposure_pct: 1.5", "max_exposure_pct"),  # leverage
+        ("max_position_pct: 0.25", "max_position_pct: 25", "max_position_pct"),  # percent typo
+        ("max_position_pct: 0.25", "max_position_pct: 0", "max_position_pct"),
+        ("daily_loss_cap_pct: 0.03", "daily_loss_cap_pct: 3", "daily_loss_cap_pct"),
+        ("max_drawdown_halt_pct: 0.15", "max_drawdown_halt_pct: 1.0", "max_drawdown_halt_pct"),
+        ("daily_loss_cap_pct: 0.03", "", "daily_loss_cap_pct"),  # missing, not defaulted
+        ("max_exposure_pct: 1.00", "max_exposure_pct: 0.2", "larger than max_exposure_pct"),
+    ],
+)
+def test_bad_risk_values_rejected(
+    config_copy: Path, line: str, replacement: str, match: str
+) -> None:
+    path = config_copy / "risk" / "balanced.yaml"
+    text = path.read_text()
+    assert line in text
+    path.write_text(text.replace(line, replacement))
+    with pytest.raises(ConfigError, match=match):
+        load_recipe("test-preset", "plumbing-10", config_copy, risk="balanced")
+
+
+def test_risk_and_limits_are_set_together() -> None:
+    risk = RiskConfig(
+        name="x",
+        max_position_pct=0.2,
+        max_exposure_pct=1.0,
+        daily_loss_cap_pct=0.02,
+        max_drawdown_halt_pct=0.1,
+    )
+    limits = OrderLimits(max_order_notional=1000.0, max_orders_per_session=5)
+    base = load_recipe("example_buy_and_hold", "plumbing-10").model_dump()
+    Recipe.model_validate({**base, "risk": risk, "limits": limits})
+    for partial in ({"risk": risk}, {"limits": limits}):
+        with pytest.raises(ValueError, match="set together"):
+            Recipe.model_validate({**base, **partial})
+
+
+# --------------------------------------------------------------------------- execution settings
+
+
+def test_repo_execution_settings_load(config_copy: Path) -> None:
+    cfg = load_execution(config_copy)
+    assert cfg.entry_limit_pct == 0.02
+    assert (cfg.approval_deadline, cfg.opg_cutoff) == (dt.time(9, 20), dt.time(9, 25))
+    assert (cfg.exit_deadline, cfg.session_deadline) == (dt.time(9, 40), dt.time(9, 50))
+    assert (cfg.poll_seconds, cfg.max_submit_attempts) == (5.0, 3)
+    assert (cfg.max_requests_per_minute, cfg.cash_tolerance) == (150, 1.0)
+    assert cfg.max_clock_skew_seconds == 30.0
+    assert cfg.limits == OrderLimits(max_order_notional=5000.0, max_orders_per_session=25)
+    assert ExecutionConfig.model_validate(cfg.model_dump(mode="json")) == cfg
+
+
+def test_missing_execution_file_is_reported(config_copy: Path) -> None:
+    (config_copy / "execution.yaml").unlink()
+    with pytest.raises(ConfigError, match="execution.yaml"):
+        load_execution(config_copy)
+    with pytest.raises(ConfigError, match="execution.yaml"):
+        load_recipe("test-preset", "plumbing-10", config_copy, risk="balanced")
+
+
+@pytest.mark.parametrize(
+    ("line", "replacement", "match"),
+    [
+        # Unquoted, YAML turns 10:30 into the number 630.
+        ('session_deadline: "09:50"', "session_deadline: 10:30", "quoted text"),
+        ('opg_cutoff: "09:25"', "opg_cutoff: 565", "quoted text"),
+        ('exit_deadline: "09:40"', 'exit_deadline: "09:55"', "exit_deadline < session_deadline"),
+        ('opg_cutoff: "09:25"', 'opg_cutoff: "09:45"', "opg_cutoff < exit_deadline"),
+        ('approval_deadline: "09:20"', 'approval_deadline: "10:00"', "approval_deadline"),
+        ('opg_cutoff: "09:25"', 'opg_cutoff: "09:35"', "before the 09:30 open"),
+        ("max_requests_per_minute: 150", "max_requests_per_minute: 1500", "max_requests_per"),
+        ("entry_limit_pct: 0.02", "entry_limit_pct: 2", "entry_limit_pct"),  # percent typo
+        ("entry_limit_pct: 0.02", "entry_limit_pct: 0", "entry_limit_pct"),
+        ("max_order_notional: 5000.0", "max_order_notional: 0", "max_order_notional"),
+        ("max_orders_per_session: 25", "max_orders_per_session: 0", "max_orders_per_session"),
+        ("max_submit_attempts: 3", "max_submit_attempts: 0", "max_submit_attempts"),
+        ("poll_seconds: 5.0", "", "poll_seconds"),  # missing, not defaulted
+        ("cash_tolerance: 1.00", "cash_tolerance: -1", "cash_tolerance"),
+    ],
+)
+def test_bad_execution_values_rejected(
+    config_copy: Path, line: str, replacement: str, match: str
+) -> None:
+    path = config_copy / "execution.yaml"
+    text = path.read_text()
+    assert line in text
+    path.write_text(text.replace(line, replacement))
+    with pytest.raises(ConfigError, match=match):
+        load_execution(config_copy)
+
+
+def test_execution_settings_reject_unknown_keys(config_copy: Path) -> None:
+    path = config_copy / "execution.yaml"
+    path.write_text(path.read_text() + "live: true\n")
+    with pytest.raises(ConfigError, match="live"):
+        load_execution(config_copy)

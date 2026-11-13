@@ -8,9 +8,11 @@ Layout:
 
     config/
       strategies/<name>.yaml   strategy presets, picked per run (UI-editable later)
+      risk/<name>.yaml         risk presets (hard limits), picked per run
       universe/<name>.yaml     symbol lists, picked per run
       dates.yaml  costs.yaml  construction.yaml  backtest.yaml  data.yaml
                                fixed settings, shared by every run (changed through review)
+      execution.yaml           fixed settings for sending orders to a venue (paper trading)
 
 A run names its presets; `load_recipe` resolves them, together with the fixed settings,
 into one `Recipe` holding every value the run uses. The run saves that resolved recipe,
@@ -25,7 +27,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import Field, JsonValue, ValidationError, model_validator
+from pydantic import Field, JsonValue, ValidationError, field_validator, model_validator
 
 from harness.models import FrozenModel, Stock
 
@@ -139,10 +141,83 @@ class DataConfig(FrozenModel):
     full_refresh_days: int = Field(ge=1)
 
 
+class RiskConfig(FrozenModel):
+    """A risk preset: the hard limits the risk manager enforces. Fractions, not percents."""
+
+    name: str
+    # Largest single position, as a fraction of equity, at the worst-case entry price.
+    max_position_pct: float = Field(gt=0, le=1)
+    # Long market value / equity. Capped at 1, so leverage cannot be configured.
+    max_exposure_pct: float = Field(gt=0, le=1)
+    # A close-to-close loss of this fraction blocks the next session's entries.
+    daily_loss_cap_pct: float = Field(gt=0, lt=1)
+    # A fall of this fraction from peak equity halts entries until an operator resets it.
+    max_drawdown_halt_pct: float = Field(gt=0, lt=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        _check_preset_name(self.name)
+        if self.max_position_pct > self.max_exposure_pct:
+            raise ValueError("max_position_pct cannot be larger than max_exposure_pct")
+        return self
+
+
+_MARKET_OPEN = dt.time(9, 30)  # New York; the regular open, also on half days
+
+
+class OrderLimits(FrozenModel):
+    """Fat-finger limits. Not risk appetite: they catch a bug, whatever preset is chosen."""
+
+    max_order_notional: float = Field(gt=0)  # dollars, per order
+    max_orders_per_session: int = Field(ge=1)  # venue orders, retries included
+
+
+class ExecutionConfig(FrozenModel):
+    """How approved orders reach the venue. Times are New York wall-clock times."""
+
+    # Entries are limit orders capped at the prior close times (1 + this). The upper
+    # bound catches a percent typed as a fraction (2 instead of 0.02).
+    entry_limit_pct: float = Field(gt=0, le=0.25)
+    approval_deadline: dt.time  # entries still unapproved are canceled
+    opg_cutoff: dt.time  # last moment an exit is sent into the opening auction
+    exit_deadline: dt.time  # an unfilled auction exit is re-sent as a market order
+    session_deadline: dt.time  # anything still working is canceled
+    poll_seconds: float = Field(gt=0, le=60)
+    max_submit_attempts: int = Field(ge=1, le=10)
+    max_requests_per_minute: int = Field(ge=1, le=200)  # Alpaca allows 200
+    cash_tolerance: float = Field(ge=0)  # dollars
+    max_clock_skew_seconds: float = Field(gt=0)
+    limits: OrderLimits
+
+    @field_validator(
+        "approval_deadline", "opg_cutoff", "exit_deadline", "session_deadline", mode="before"
+    )
+    @classmethod
+    def _time_must_be_text(cls, value: object) -> object:
+        # Unquoted, YAML reads 10:30 as the number 630, which would then be taken as
+        # seconds after midnight. Only "HH:MM" text is accepted.
+        if not isinstance(value, str):
+            raise ValueError('write times as quoted text, for example "09:25"')
+        return value
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        if not self.opg_cutoff < self.exit_deadline < self.session_deadline:
+            raise ValueError("need opg_cutoff < exit_deadline < session_deadline")
+        if not self.approval_deadline < self.session_deadline:
+            raise ValueError("approval_deadline must be before session_deadline")
+        # After the open no exit could go into the opening auction at all. The venue's
+        # own auction cutoff is earlier still; the adapter checks against that.
+        if not self.opg_cutoff < _MARKET_OPEN:
+            raise ValueError("opg_cutoff must be before the 09:30 open")
+        return self
+
+
 class Recipe(FrozenModel):
     """Every config value one run uses: the chosen presets plus the fixed settings.
 
-    Risk presets join in slice 2; until then runs have no risk layer.
+    `risk` is None for a run without a risk preset. A run with one also carries the
+    order limits, because the risk manager enforces both.
     """
 
     strategy: StrategyPreset
@@ -152,6 +227,14 @@ class Recipe(FrozenModel):
     construction: ConstructionConfig
     backtest: BacktestConfig
     data: DataConfig
+    risk: RiskConfig | None = None
+    limits: OrderLimits | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        if (self.risk is None) != (self.limits is None):
+            raise ValueError("risk and limits are set together or not at all")
+        return self
 
 
 _FIXED_SECTIONS = ("dates", "costs", "construction", "backtest", "data")
@@ -195,8 +278,26 @@ def _resolve_paths(section: dict[str, Any], keys: tuple[str, ...], root: Path) -
     return resolved
 
 
-def load_recipe(strategy: str, universe: str, config_dir: Path = DEFAULT_CONFIG_DIR) -> Recipe:
+def load_execution(config_dir: Path = DEFAULT_CONFIG_DIR) -> ExecutionConfig:
+    """The fixed execution settings in `config_dir`/execution.yaml."""
+    path = config_dir.resolve() / "execution.yaml"
+    try:
+        return ExecutionConfig.model_validate(_read_yaml(path))
+    except ValidationError as exc:
+        raise ConfigError(f"invalid config in {path}:\n{exc}") from exc
+
+
+def load_recipe(
+    strategy: str,
+    universe: str,
+    config_dir: Path = DEFAULT_CONFIG_DIR,
+    *,
+    risk: str | None = None,
+) -> Recipe:
     """Resolve the named presets and the fixed settings in `config_dir` into one Recipe.
+
+    `risk` names a preset in `risk/`. Without it the recipe has no risk limits and
+    execution.yaml is not read, so plain backtests do not depend on that file.
 
     Relative paths (data cache, holdout log, run outputs) come back absolute, resolved
     against `config_dir`'s parent.
@@ -212,6 +313,9 @@ def load_recipe(strategy: str, universe: str, config_dir: Path = DEFAULT_CONFIG_
         raw[section] = _read_yaml(config_dir / f"{section}.yaml")
     for section, keys in _PATH_FIELDS.items():
         raw[section] = _resolve_paths(raw[section], keys, config_dir.parent)
+    if risk is not None:
+        raw["risk"] = _read_preset(config_dir, "risk", risk)
+        raw["limits"] = load_execution(config_dir).limits
     try:
         return Recipe.model_validate(raw)
     except ValidationError as exc:

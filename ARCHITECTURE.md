@@ -231,6 +231,12 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   `config/risk/`, and `config/universe/` hold named presets picked for each run. Costs,
   construction, dates, and data settings stay single files. A run names its presets; the
   loader resolves them.
+- **Risk presets hold risk appetite; `config/execution.yaml` holds everything else about
+  sending orders:** a preset has four limits (position size, exposure, daily loss cap,
+  drawdown halt), and exposure is capped at 1 by type, so leverage cannot be configured.
+  Fat-finger limits (largest order, orders per session) are not appetite: they are fixed
+  settings in `execution.yaml` with the order timing. A run with a risk preset copies the
+  fat-finger limits into its recipe; a run without one never reads `execution.yaml`.
 - **Every run stores its resolved recipe:** the run folder holds the full values used, not
   just preset names, so editing a preset later never changes what an old run means. The
   run index records the strategy, its preset, and the risk preset.
@@ -270,7 +276,8 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
 - Is the flat 0.05% cost assumption realistic once paper fills come in?
 - Data source for historical index membership, if stock-picking strategies are pursued.
 - Actual hard-limit values for each slice 2 risk preset (position size, exposure, daily
-  loss cap, drawdown halt).
+  loss cap, drawdown halt), and the values in `config/execution.yaml` (entry limit, order
+  deadlines, fat-finger limits). Both hold placeholders until chosen.
 - Historical options data source for the options phase (ThetaData is the leading candidate).
 - How long manual-approval mode stays on after going live.
 - What covers "the machine was off at 08:00" before anything runs unattended: an always-on
