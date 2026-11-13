@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import datetime as dt
+from collections.abc import Callable, Mapping, Sequence
 
 import pytest
 
 from harness.broker.sim import SimBroker
-from harness.engine import StrategyError, simulate
-from harness.models import Leg, OptionContract, PortfolioSnapshot, Signal, Stock
+from harness.engine import BacktestResult, StrategyError, simulate
+from harness.models import (
+    MARKET_TZ,
+    Fill,
+    Leg,
+    OptionContract,
+    Order,
+    OrderUpdate,
+    OrderUpdateReason,
+    PortfolioSnapshot,
+    Signal,
+    Stock,
+)
 from harness.view import MarketView
 from strategies.base import Strategy
 from tests.fixture_strategies import BuyAndHold, Recorder
@@ -159,6 +171,100 @@ def test_order_for_symbol_without_next_open_is_canceled_and_logged() -> None:
     (event,) = [e for e in result.events if e.kind == "order_canceled"]
     assert (event.symbol, event.date) == ("AAPL", panel.dates[3])
     assert "no_bar" in event.detail
+
+
+class ScriptedBroker(SimBroker):
+    """A SimBroker whose update stream can be replaced, to feed the engine statuses that
+    only a live broker reports."""
+
+    def __init__(self, script: Callable[[list[str]], list[OrderUpdate]]) -> None:
+        super().__init__(10_000, COSTS)
+        self._script = script
+        self._ids: list[str] = []
+        self._pending = False
+
+    def submit(self, orders: Sequence[Order]) -> list[str]:
+        ids = super().submit(orders)
+        self._ids.extend(ids)
+        return ids
+
+    def on_session_open(self, session: dt.date, opens: Mapping[str, float]) -> None:
+        self._pending = bool(self._ids)
+
+    def poll_updates(self) -> list[OrderUpdate]:
+        if not self._pending:
+            return []
+        self._pending = False
+        ids, self._ids = self._ids, []
+        return self._script(ids)
+
+    def cancel_all(self, reason: OrderUpdateReason) -> list[str]:
+        return []
+
+
+def _run_scripted(script: Callable[[list[str]], list[OrderUpdate]]) -> BacktestResult:
+    class EnterDay3(Strategy):
+        def on_bar(self, view, portfolio):  # type: ignore[no-untyped-def]
+            return [Signal.enter("AAPL", 1.0)] if view.n_bars == 3 else []
+
+    panel = make_panel(SYMBOLS, 6)
+    return simulate(EnterDay3(), panel, ScriptedBroker(script), SYMBOLS, construction(), COSTS)
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "kind"),
+    [
+        ("rejected", "broker_rejected", "order_rejected"),
+        ("expired", "limit_not_reached", "order_expired"),
+        ("canceled", "session_deadline", "order_canceled"),
+    ],
+)
+def test_live_terminal_statuses_are_logged(status: str, reason: str, kind: str) -> None:
+    result = _run_scripted(
+        lambda ids: [OrderUpdate(order_id=i, status=status, reason=reason) for i in ids]  # type: ignore[arg-type]
+    )
+    (event,) = result.events
+    assert (event.kind, event.symbol) == (kind, "AAPL")
+    assert reason in event.detail
+    assert result.fills == ()
+
+
+def test_partial_fills_are_logged_and_collected() -> None:
+    day4 = make_panel(SYMBOLS, 6).dates[3]
+
+    def fill(order_id: str, quantity: int) -> Fill:
+        return Fill(
+            order_id=order_id,
+            kind="venue",
+            signal_date=make_panel(SYMBOLS, 6).dates[2],
+            fill_date=day4,
+            price_date=day4,
+            instrument=Stock(symbol="AAPL"),
+            side="buy",
+            quantity=quantity,
+            reference_price=60.0,
+            price=60.0,
+            slippage_cost=0.0,
+            commission=0.0,
+            filled_at=dt.datetime.combine(day4, dt.time(9, 31), MARKET_TZ),
+        )
+
+    def script(ids: list[str]) -> list[OrderUpdate]:
+        (order_id,) = ids
+        return [
+            OrderUpdate(order_id=order_id, status="partially_filled", fills=(fill(order_id, 3),)),
+            OrderUpdate(order_id=order_id, status="canceled", reason="session_deadline"),
+        ]
+
+    result = _run_scripted(script)
+    assert [e.kind for e in result.events] == ["order_partial", "order_canceled"]
+    assert "3 of" in result.events[0].detail
+    assert [f.quantity for f in result.fills] == [3]
+
+
+def test_update_without_fills_for_an_unknown_order_raises() -> None:
+    with pytest.raises(RuntimeError, match="unknown order"):
+        _run_scripted(lambda ids: [OrderUpdate(order_id="nope", status="rejected")])
 
 
 def test_equity_marks_held_symbol_at_last_close_while_bar_missing() -> None:

@@ -34,7 +34,6 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -44,10 +43,9 @@ from pydantic import Field
 
 from harness.config import DataConfig, DateConfig
 from harness.keys import KeysError, read_alpaca_paper_keys
-from harness.models import FrozenModel, Stock
+from harness.models import MARKET_TZ, FrozenModel, Stock
 from harness.view import PRICE_FIELDS, PriceField
 
-MARKET_TZ = ZoneInfo("America/New_York")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PRICE_TOLERANCE = 1e-6  # same relative slack as models.Bar, for vendor rounding
 

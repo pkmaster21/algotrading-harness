@@ -1,4 +1,5 @@
 import datetime as dt
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -38,6 +39,17 @@ def _fill(**overrides: object) -> Fill:
     )
     base.update(overrides)
     return Fill(**base)  # type: ignore[arg-type]
+
+
+NEW_YORK = ZoneInfo("America/New_York")
+OPEN_D1 = dt.datetime(2024, 1, 2, 9, 31, tzinfo=NEW_YORK)
+OPEN_D2 = dt.datetime(2024, 1, 3, 9, 31, tzinfo=NEW_YORK)
+
+
+def _venue_fill(**overrides: object) -> Fill:
+    base: dict[str, object] = dict(kind="venue", filled_at=OPEN_D2, slippage_cost=0.0, price=100.05)
+    base.update(overrides)
+    return _fill(**base)
 
 
 class TestBar:
@@ -164,6 +176,56 @@ class TestFill:
         with pytest.raises(ValidationError):
             _fill(kind="forced_close", signal_date=later, fill_date=later, price_date=D1)
 
+    def test_simulated_fills_have_no_time_of_day(self) -> None:
+        assert _fill().filled_at is None
+        with pytest.raises(ValidationError, match="only for venue fills"):
+            _fill(filled_at=OPEN_D2)
+        later = dt.date(2024, 1, 10)
+        with pytest.raises(ValidationError, match="only for venue fills"):
+            _fill(
+                kind="forced_close",
+                side="sell",
+                signal_date=later,
+                fill_date=later,
+                price_date=D1,
+                filled_at=OPEN_D2,
+            )
+
+    def test_venue_fill_valid(self) -> None:
+        f = _venue_fill()
+        assert f.filled_at == OPEN_D2
+        assert f.cash_delta == pytest.approx(-1000.5)
+
+    def test_venue_fill_rejects_signal_session_and_earlier(self) -> None:
+        # The look-ahead rule is the same as for simulated fills: a later session only.
+        with pytest.raises(ValidationError, match="look-ahead"):
+            _venue_fill(fill_date=D1, price_date=D1, filled_at=OPEN_D1)
+        with pytest.raises(ValidationError, match="look-ahead"):
+            _venue_fill(signal_date=D2, filled_at=OPEN_D2)
+        with pytest.raises(ValidationError):
+            _venue_fill(price_date=D1)
+
+    def test_venue_fill_needs_an_aware_time_on_the_fill_date(self) -> None:
+        with pytest.raises(ValidationError, match="timezone-aware"):
+            _venue_fill(filled_at=None)
+        with pytest.raises(ValidationError, match="timezone-aware"):
+            _venue_fill(filled_at=dt.datetime(2024, 1, 3, 9, 31))
+        with pytest.raises(ValidationError, match="not on fill_date"):
+            _venue_fill(filled_at=OPEN_D2 + dt.timedelta(days=1))
+
+    def test_venue_fill_date_is_the_new_york_date(self) -> None:
+        # 01:00 UTC on Jan 4 is 20:00 on Jan 3 in New York.
+        late = dt.datetime(2024, 1, 4, 1, 0, tzinfo=dt.UTC)
+        assert _venue_fill(filled_at=late).fill_date == D2
+        with pytest.raises(ValidationError, match="not on fill_date"):
+            _venue_fill(
+                fill_date=dt.date(2024, 1, 4), price_date=dt.date(2024, 1, 4), filled_at=late
+            )
+
+    def test_venue_fill_carries_no_slippage_estimate(self) -> None:
+        with pytest.raises(ValidationError, match="slippage_cost must be 0"):
+            _venue_fill(slippage_cost=0.5)
+
     def test_option_notional_uses_multiplier(self) -> None:
         call = OptionContract(
             underlying="AAPL", expiry=dt.date(2024, 2, 16), strike=150, right="call"
@@ -180,6 +242,33 @@ class TestOrderUpdate:
     def test_canceled_has_no_fills(self) -> None:
         with pytest.raises(ValidationError):
             OrderUpdate(order_id="sim-000001", status="canceled", fills=(_fill(),), reason="no_bar")
+
+    def test_partially_filled_needs_fills(self) -> None:
+        with pytest.raises(ValidationError, match="needs at least one fill"):
+            OrderUpdate(order_id="sim-000001", status="partially_filled")
+        update = OrderUpdate(order_id="sim-000001", status="partially_filled", fills=(_fill(),))
+        assert update.fills[0].quantity == 10
+
+    @pytest.mark.parametrize(
+        ("status", "reason"),
+        [("rejected", "broker_rejected"), ("expired", "limit_not_reached")],
+    )
+    def test_rejected_and_expired_have_no_fills(self, status: str, reason: str) -> None:
+        assert OrderUpdate(order_id="sim-000001", status=status, reason=reason).fills == ()  # type: ignore[arg-type]
+        with pytest.raises(ValidationError, match="has no fills"):
+            OrderUpdate(order_id="sim-000001", status=status, fills=(_fill(),), reason=reason)  # type: ignore[arg-type]
+
+    def test_a_partial_then_canceled_order_is_two_updates(self) -> None:
+        # Fills are incremental, so the cancel of the remainder carries none.
+        partial = OrderUpdate(order_id="sim-000001", status="partially_filled", fills=(_fill(),))
+        rest = OrderUpdate(order_id="sim-000001", status="canceled", reason="session_deadline")
+        assert sum(f.quantity for u in (partial, rest) for f in u.fills) == 10
+
+    def test_unknown_status_and_reason_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            OrderUpdate(order_id="sim-000001", status="pending")  # type: ignore[arg-type]
+        with pytest.raises(ValidationError):
+            OrderUpdate(order_id="sim-000001", status="canceled", reason="because")  # type: ignore[arg-type]
 
     def test_fill_ids_match(self) -> None:
         with pytest.raises(ValidationError):
