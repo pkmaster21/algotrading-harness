@@ -22,8 +22,9 @@ not for routine strategy work.
 - **Strategies emit Signals only.** A strategy never calls a broker, never places orders,
   never reads API keys or environment variables, and never reads files directly.
 - **The harness owns** data, portfolio construction, risk, execution, and position tracking.
-- **One code path.** Backtest, paper, and live use the same engine. Only the Broker
-  adapter changes (SimBroker for backtests, AlpacaBroker later).
+- **One code path.** Strategy, construction, risk and the engine are shared by backtest,
+  paper and live. Live adds order management, reconciliation and a clock-driven runner
+  around the broker.
 - **Orders are lists of Legs.** A stock trade is a one-leg Signal. This keeps options
   (multi-leg) addable later without changing the data model.
 - **No look-ahead.** At the close of bar t, a strategy sees bars up to and including t.
