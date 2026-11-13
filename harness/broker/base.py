@@ -31,19 +31,25 @@ class Broker(ABC):
 
     @abstractmethod
     def on_session_open(self, session: dt.date, opens: Mapping[str, float]) -> None:
-        """Called by the engine at the start of every session, in date order.
+        """Called by the engine at the start of every traded session, in date order.
+        Not called for warm-up sessions.
 
         SimBroker executes its queue here using only `opens` (this session's opening
         prices). A live adapter ignores it, because real fills come from the venue.
         """
 
     @abstractmethod
-    def force_close(self, symbol: str, price: float, price_date: dt.date, session: dt.date) -> str:
+    def force_close(
+        self, symbol: str, price: float, price_date: dt.date, session: dt.date
+    ) -> str | None:
         """Close the whole position in `symbol` at a stale `price` from `price_date`.
 
         Used when a held symbol has stopped trading (delisted or long halt). Returns the
-        order id; the fill is reported through `poll_updates`. AlpacaBroker will need its
-        own answer in slice 2 (see ARCHITECTURE.md, open questions).
+        order id; the fill is reported through `poll_updates`.
+
+        A real venue cannot sell at a stale price, so a live broker returns None and
+        leaves the position alone: it never invents a fill. The engine logs
+        `position_stale_no_data` and reconciliation picks up whatever the venue did.
         """
 
     @abstractmethod

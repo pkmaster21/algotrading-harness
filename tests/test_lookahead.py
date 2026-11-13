@@ -193,3 +193,16 @@ def test_view_rejects_bad_requests() -> None:
         view.history("close", lookback=1, symbols=["TSLA"])
     with pytest.raises(ValueError):
         MarketView(buffer, 2)  # cannot build a view longer than what was appended
+
+
+def test_trailing_missing_counts_the_latest_run_of_sessions_without_a_bar() -> None:
+    panel = make_panel(["SPY", "AAPL", "NEW"], 6, missing={"AAPL": [1, 4, 5], "NEW": range(6)})
+    buffer = BarBuffer(panel.symbols, capacity=8)
+    seen = []
+    for i, session in enumerate(panel.dates):
+        buffer.append(session, {f: panel.field(f)[i] for f in PRICE_FIELDS})
+        seen.append([buffer.trailing_missing(s) for s in panel.symbols])
+    assert seen == [[0, 0, 1], [0, 1, 2], [0, 0, 3], [0, 0, 4], [0, 1, 5], [0, 2, 6]]
+    with pytest.raises(KeyError, match="not in the universe"):
+        buffer.trailing_missing("TSLA")
+    assert BarBuffer(["SPY"], capacity=2).trailing_missing("SPY") == 0

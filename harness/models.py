@@ -57,6 +57,7 @@ EventKind = Literal[
     "order_rejected",
     "order_expired",
     "position_closed_no_data",
+    "position_stale_no_data",
 ]
 
 MARKET_TZ = ZoneInfo("America/New_York")  # session dates are New York dates
