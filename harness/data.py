@@ -28,6 +28,7 @@ import datetime as dt
 import hashlib
 import math
 import os
+import tempfile
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -426,7 +427,12 @@ class _BarCache:
         return _clean(pq.read_table(path).to_pandas()) if path.is_file() else _empty_frame()
 
     def write(self, symbol: str, frame: pd.DataFrame, meta: CacheMeta) -> None:
-        """Atomically replace the symbol's file (temp file, then rename)."""
+        """Atomically replace the symbol's file (temp file, then rename).
+
+        Each write gets its own temp file in the cache directory, so two runs writing the
+        same symbol at once cannot interleave in one file; the last rename wins. A failed
+        write removes its temp file and leaves the existing cache file untouched.
+        """
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         frame = _clean(frame)
         schema = pa.schema(
@@ -435,9 +441,17 @@ class _BarCache:
         )
         table = pa.Table.from_pydict({c: list(frame[c]) for c in _COLUMNS}, schema=schema)
         path = self.path(symbol)
-        tmp = path.with_suffix(".parquet.tmp")
-        pq.write_table(table, tmp)
-        os.replace(tmp, path)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self.cache_dir, prefix=f"{symbol}.", suffix=".parquet.tmp"
+        )
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            pq.write_table(table, tmp)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 # --------------------------------------------------------------------------- loader
@@ -473,7 +487,11 @@ class DataLoader:
     # ------------------------------------------------------------------ cutoff
 
     def cutoff(self, holdout: HoldoutAccess | None) -> dt.date:
-        """Exclusive end date. Without holdout access this is always the holdout start."""
+        """Exclusive end date. Without holdout access this is always the holdout start.
+
+        This is the permission boundary. `load` additionally never goes past the last
+        completed session, whichever comes first.
+        """
         if holdout is None:
             return self.dates.holdout_start
         last = _last_completed_session(self._now())
@@ -482,7 +500,13 @@ class DataLoader:
         return last + dt.timedelta(days=1)
 
     def load(self, symbols: Sequence[str], *, holdout: HoldoutAccess | None = None) -> BarPanel:
-        """Bars from `dates.data_start` up to (not including) the cutoff, as a BarPanel.
+        """Bars from `dates.data_start` through the last completed session before the
+        cutoff, as a BarPanel.
+
+        The end is `min(cutoff - 1 day, last completed session)` in every mode, and that
+        date is what the cache records as covered. Without the clamp, a cutoff later than
+        today (an `in_sample_end` in the future) would mark sessions that have not
+        happened yet as cached, and they would stay missing until the next full refresh.
 
         With `holdout`, the holdout log line is appended first; if that fails, nothing
         is loaded.
@@ -490,11 +514,19 @@ class DataLoader:
         symbols = list(dict.fromkeys(symbols))  # dedupe, keep order
         start = self.dates.data_start
         cutoff = self.cutoff(holdout)
-        end = cutoff - dt.timedelta(days=1)
+        end = min(cutoff - dt.timedelta(days=1), _last_completed_session(self._now()))
+        if end < start:
+            raise DataError(
+                f"no completed session to load: data_start is {start}, "
+                f"and the last loadable day is {end}"
+            )
         if holdout is not None:
             self._log_holdout(holdout, start, end)
         self._refresh(symbols, start, end, cutoff)
-        frames = {s: self._cache.read(s, start, cutoff) for s in symbols}
+        # Read through `end`, not the cutoff: never past the holdout boundary, and never a
+        # row later than the range this load asked for.
+        before = end + dt.timedelta(days=1)
+        frames = {s: self._cache.read(s, start, before) for s in symbols}
         return BarPanel.from_frames(frames)
 
     def _log_holdout(self, access: HoldoutAccess, start: dt.date, end: dt.date) -> None:

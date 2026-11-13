@@ -141,6 +141,103 @@ def test_no_fetcher_is_built_when_cache_is_complete(tmp_path: Path) -> None:
     DataLoader(r.dates, r.data, fetcher_factory=no_network, now=lambda: NOW).load(["SPY"])
 
 
+def _future_in_sample_config(tmp_path: Path) -> Path:
+    """in_sample_end 2026-12-31, later than the tests' clock (NOW = 2026-07-01)."""
+    config = tmp_config(tmp_path)
+    dates = config / "dates.yaml"
+    dates.write_text(
+        dates.read_text().replace("2026-03-31", "2026-12-31").replace("2026-04-01", "2027-01-01")
+    )
+    return config
+
+
+def test_load_never_requests_past_the_last_completed_session(tmp_path: Path) -> None:
+    config = _future_in_sample_config(tmp_path)
+    fetcher = FakeFetcher()
+    panel = _loader(config, fetcher).load(["SPY"])
+    yesterday = dt.date(2026, 6, 30)
+    assert fetcher.latest_end == yesterday  # not 2026-12-31: those sessions have not happened
+    assert max(panel.dates) == yesterday
+    meta = _loader(config, fetcher)._cache.meta("SPY")
+    assert meta is not None and meta.coverage_end == yesterday
+
+
+def test_cache_extends_as_sessions_complete_before_in_sample_end(tmp_path: Path) -> None:
+    config = _future_in_sample_config(tmp_path)
+    fetcher = FakeFetcher()
+    _loader(config, fetcher).load(["SPY"])
+    fetcher.requests.clear()
+    later = NOW + dt.timedelta(days=20)  # 2026-07-21; last completed session 2026-07-20
+    panel = _loader(config, fetcher, now=later).load(["SPY"])
+    ((_, start, end),) = fetcher.requests  # one extend request, not a full refetch
+    assert start == dt.date(2026, 6, 24)  # the 5 overlap bars: 6/24 .. 6/30
+    assert end == dt.date(2026, 7, 20)
+    assert max(panel.dates) == dt.date(2026, 7, 20)
+
+
+def test_holdout_log_records_the_clamped_end(tmp_path: Path) -> None:
+    from harness.data import read_holdout_log
+
+    config = tmp_config(tmp_path, holdout_end="2026-09-30")  # pinned later than the clock
+    panel = _loader(config, FakeFetcher()).load(["SPY"], holdout=ACCESS)
+    assert max(panel.dates) == dt.date(2026, 6, 30)
+    (row,) = read_holdout_log(recipe(config).data.holdout_log)
+    assert row["data_end"] == "2026-06-30"
+
+
+def test_load_before_any_session_has_completed_is_a_clear_error(tmp_path: Path) -> None:
+    config = tmp_config(tmp_path)  # data_start 2025-10-01
+    early = dt.datetime(2025, 10, 1, 15, 0, tzinfo=dt.UTC)
+    fetcher = FakeFetcher()
+    with pytest.raises(DataError, match="no completed session"):
+        _loader(config, fetcher, now=early).load(["SPY"])
+    assert fetcher.requests == []
+
+
+def test_each_cache_write_uses_its_own_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import harness.data as data_module
+
+    config = tmp_config(tmp_path)
+    written: list[Path] = []
+    real_write = data_module.pq.write_table
+
+    def recording_write(table, where, *args, **kwargs):  # type: ignore[no-untyped-def]
+        written.append(Path(where))
+        real_write(table, where, *args, **kwargs)
+
+    monkeypatch.setattr(data_module.pq, "write_table", recording_write)
+    _loader(config, FakeFetcher()).load(["SPY"])
+    _loader(config, FakeFetcher(), now=NOW + dt.timedelta(days=30)).load(["SPY"])  # refresh
+    assert len(written) == 2
+    assert written[0] != written[1]  # two runs writing SPY at once cannot share a temp file
+    cache_dir = recipe(config).data.cache_dir
+    assert all(p.parent == cache_dir for p in written)  # same directory: rename stays atomic
+    assert [p.name for p in cache_dir.iterdir()] == ["SPY.parquet"]
+
+
+def test_failed_cache_write_keeps_the_old_file_and_leaves_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import harness.data as data_module
+
+    config = tmp_config(tmp_path)
+    first = _loader(config, FakeFetcher()).load(["SPY"])
+
+    def half_write(table, where, *args, **kwargs):  # type: ignore[no-untyped-def]
+        Path(where).write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(data_module.pq, "write_table", half_write)
+    with pytest.raises(OSError, match="disk full"):
+        _loader(config, FakeFetcher(), now=NOW + dt.timedelta(days=30)).load(["SPY"])
+    monkeypatch.undo()
+    cache_dir = recipe(config).data.cache_dir
+    assert [p.name for p in cache_dir.iterdir()] == ["SPY.parquet"]
+    assert _loader(config, FakeFetcher()).load(["SPY"]).fingerprint() == first.fingerprint()
+
+
 # --------------------------------------------------------------------------- pieces
 
 
