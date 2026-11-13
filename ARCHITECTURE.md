@@ -25,7 +25,9 @@ Data feed ──► Strategy (alpha) ──► Construction ──► Risk (hard
 Kill switch: cancels all orders and stops the engine, from anywhere.
 ```
 
-Backtest, paper, and live run this exact pipeline. Only the broker adapter changes.
+Backtest, paper, and live share strategy, construction, risk, and the engine. In backtests
+SimBroker stands in for the order manager and the broker; live adds order management,
+reconciliation, and a clock-driven runner around the broker.
 
 ## Components
 
@@ -89,7 +91,8 @@ so a strategy can be defined as data (indicators and conditions) and edited in t
 First acceptance test: one strategy written both as Python and as a template produces
 identical backtests.
 
-**Slice 2: paper trading** (built once a strategy survives validation). Risk manager with
+**Slice 2: paper trading** (originally planned for once a strategy survives validation;
+started early, see Decision log, 2026-11-12). Risk manager with
 three risk presets (conservative, balanced, aggressive), order manager with an optional
 manual-approval mode for early live use, positions and reconciliation, Alpaca paper
 adapter, kill switch, logging and alerts. A run that passed validation is promoted to a
@@ -231,6 +234,22 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
 - **Runs from before `risk.py` are labeled `risk: none`** and are not compared directly
   with runs that use a risk preset.
 
+### Slice 2 started before a strategy is validated (2026-11-12)
+
+- **Build order changed, strategy lifecycle unchanged:** slice 2 (paper trading) is designed
+  and built before any strategy has survived validation, and ahead of rule templates.
+  Reason: access to the model assigned to safety-critical work (see Model usage) is limited,
+  so risk, order management, positions and reconciliation, the kill switch, and the Alpaca
+  paper adapter are built while it is available. What does not change: a strategy still
+  reaches paper only after backtest and holdout (lifecycle steps 4 to 6), backtesting keeps
+  working unchanged while slice 2 lands, and the slice 2 end-to-end paper test uses the
+  tracked `example_buy_and_hold` strategy as a plumbing check, not as a validated strategy.
+  Design: `docs/slice2-design.md`.
+- **Slice 2 design approved (2026-11-12):** decisions D1 to D10 in `docs/slice2-design.md`
+  are approved as recommended, including the reworded one-code-path rule in `CLAUDE.md`.
+  Existing Decision log entries that paper trading changes (section 0.5 of that doc) are
+  reworded in the PR that implements each change, not before.
+
 ## Open questions
 
 - Is the flat 0.05% cost assumption realistic once paper fills come in?
@@ -239,6 +258,11 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   loss cap, drawdown halt).
 - Historical options data source for the options phase (ThetaData is the leading candidate).
 - How long manual-approval mode stays on after going live.
+- What covers "the machine was off at 08:00" before anything runs unattended: an always-on
+  host, broker-side protective stops, or a heartbeat that pages on a missed run. Push
+  alerts plus one of these are a hard gate for unattended use (paper or live). Options and
+  their conflicts with the slice 2 design: `docs/slice2-design.md`, "Gate before
+  unattended use".
 - Back-adjusted prices are not the prices traded at the time. Returns are correct, but
   whole-share counts and any price-level rule (for example "price > $5") are slightly off
   historically. Fine for slice 1; revisit before strategies that filter on price level
