@@ -4,6 +4,7 @@ batch requests, and convert Alpaca responses. No network."""
 from __future__ import annotations
 
 import datetime as dt
+import os
 from pathlib import Path
 
 import numpy as np
@@ -281,10 +282,23 @@ def test_alpaca_frames_handle_empty_response() -> None:
     assert frames_from_alpaca_df(pd.DataFrame(), ["SPY"])["SPY"].empty
 
 
-def test_missing_credentials_fail_clearly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
-    monkeypatch.delenv("ALPACA_PAPER_SECRET_KEY", raising=False)
+def test_missing_credentials_fail_clearly(tmp_path: Path) -> None:
     config = tmp_config(tmp_path)
     r = recipe(config)
-    with pytest.raises(DataError, match="ALPACA_PAPER_API_KEY"):
+    with pytest.raises(DataError, match="ALPACA_PAPER_API_KEY.*to download bars"):
         AlpacaBarFetcher(r.data, RateLimiter(10), dotenv_path=tmp_path / "no.env")
+
+
+def test_fetcher_takes_keys_from_the_file_and_never_exports_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_PAPER_SECRET_KEY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("ALPACA_PAPER_API_KEY=PKTESTKEYID\nALPACA_PAPER_SECRET_KEY=test-secret\n")
+    r = recipe(tmp_config(tmp_path))
+    before = dict(os.environ)
+    AlpacaBarFetcher(r.data, RateLimiter(10), dotenv_path=env_file)  # no request is made
+    assert dict(os.environ) == before
+    assert "PKTESTKEYID" not in os.environ.values()
+    assert "test-secret" not in os.environ.values()
