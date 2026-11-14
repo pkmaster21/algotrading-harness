@@ -54,7 +54,8 @@ reconciliation, and a clock-driven runner around the broker.
 | `strategies/rules.py` | Generic strategy that runs a rule template (indicators plus conditions, as data) | Rules |
 | `harness/risk.py` | Hard limits; can shrink or reject; never blocks risk-reducing orders | 2 |
 | `harness/orders.py` | Limit pricing, retries, rate limits, optional manual approval | 2 |
-| `harness/positions.py` | Positions, cash, P&L, reconciliation against the broker | 2 |
+| `harness/positions.py` | Ledger: cash, positions and realized P&L, built only from journaled fills and operator adjustments. Reconciliation against the broker, which compares and never corrects | 2 |
+| `harness/journal.py` | Append-only, fsynced event log; the source of truth for paper trading state. The writer holds an exclusive file lock | 2 |
 | `harness/broker/alpaca.py` | Paper/live adapter; the only code holding trading keys | 2 |
 | `harness/pricing.py` | Implied volatility and Greeks | Options |
 
@@ -323,7 +324,9 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
 - Deposits and withdrawals look like gains and losses to the risk manager: the daily loss
   cap and the drawdown halt compare equity from one close to the next. A withdrawal could
   trip them and a deposit could hide a real loss. Irrelevant until money moves in or out
-  of the account; then equity changes need to be net of cash flows.
+  of the account; then equity changes need to be net of cash flows. The ledger has the
+  same gap: a `LedgerAdjustment` that adds shares with a cost basis and no cash (a
+  transfer-in) is booked as a realized gain equal to the cost basis.
 - Realized versus unrealized P&L in `trades.csv`: a position that is partly sold when the
   report is written is one open row, and its `pnl` mixes realized gains (shares sold) with
   unrealized ones (shares marked at the last close). Common in paper, where the report is
