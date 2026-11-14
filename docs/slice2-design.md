@@ -965,7 +965,7 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 17 | `feat(data): paper access path` | `PaperAccess`, paper access log | Holdout handling |
 | 18 | `feat(profiles): frozen profiles and promotion` | `profiles.py`, restart-equivalence check, plumbing profile; `RiskState` is seeded from the account's actual equity when a profile starts (not from starting cash) and saved between days | |
 | 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests; the paper day's saved recipe records the whole `ExecutionConfig`, not only `limits`; a `RiskStateError` on a rerun (the mark differs from the first attempt) is reported as "account changed since the first attempt, reconcile first", not as a traceback | |
-| 20 | `feat(service): status and control functions` | `service.py`; `ui-design.md` contract update; resetting a drawdown halt journals who reset it, why, and the old peak (the reset erases it from state) | |
+| 20 | `feat(service): status and control functions` | `service.py`; `ui-design.md` contract update; resetting a drawdown halt journals who reset it, why, and the old peak (the reset erases it from state); adjustments get an `adjustment_id` that names the event (for example `2024-01-04-AAPL-dividend`), so entering one twice is a no-op | |
 | 21 | `test(paper): end-to-end against the fake venue` | Multi-day buy-and-hold with injected faults; operator runbook | |
 | 22 | End-to-end on the real paper account (run by you) | Checklist below; results recorded in `ARCHITECTURE.md` | Credentials |
 

@@ -3,9 +3,10 @@
 .env.*
 !.env.example
 
-# Local data and run outputs
+# Local data, run outputs, and paper trading state
 data/
 backtests/
+state/
 
 # Python
 .venv/
