@@ -37,6 +37,8 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models | 1 |
 | `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff | 1 |
 | `harness/ratelimit.py` | Request rate limiter shared by the data loader and the venue adapter | 2 |
+| `harness/killswitch.py` | Kill latch file (fails closed, any process can set it) and `kill`, which sets it, then cancels open orders and confirms. Never sells | 2 |
+| `harness/alerts.py` | `Alert`, the `Alerter` protocol, and the log and `alerts.jsonl` sinks. A sink never raises | 2 |
 | `harness/keys.py` | Read API keys from `.env` into a redacted local object; never touches the environment | 2 |
 | `harness/view.py` | Append-only bar buffer and the read-only `MarketView` strategies receive | 1 |
 | `harness/guard.py` | Runtime guard: rejects file opens, network use, and process starts while strategy code runs | 1 |
