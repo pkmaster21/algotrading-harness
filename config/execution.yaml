@@ -7,6 +7,7 @@ exit_deadline: "09:40"           # an auction exit still unfilled now is re-sent
 session_deadline: "09:50"        # anything still working now is canceled
 poll_seconds: 5.0                # how often order status is checked
 max_submit_attempts: 3           # tries per order when the venue does not answer
+cancel_confirm_seconds: 30.0     # a cancel not confirmed by the venue within this stops trading
 max_requests_per_minute: 150     # trading API calls; Alpaca allows 200
 cash_tolerance: 1.00             # dollars of cash difference reconciliation accepts with a warning
 max_clock_skew_seconds: 30.0     # local clock versus venue clock; more than this stops trading

@@ -193,6 +193,10 @@ class Ledger:
     def realized(self) -> float:
         return self._realized
 
+    def filled_quantity(self, order_id: str) -> int:
+        """Shares of `order_id` applied so far, over all of its fills."""
+        return self._filled.get(order_id, 0)
+
     def account(self) -> AccountState:
         return AccountState(cash=self._cash, positions=dict(self._positions))
 

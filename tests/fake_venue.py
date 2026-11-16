@@ -20,6 +20,9 @@ Default behavior of an order with no script:
 Scripts (`script(key, ...)`, keyed by client order id or by symbol) override that for one
 order: reject it, time out before or after accepting it, fill it in pieces on a schedule,
 or fill part of it while a cancel is in flight. `fail_next` makes any method time out.
+`lag_lookups` hides an accepted order from `get_order` for a while, and
+`reject_duplicate_ids` makes a repeated client order id a rejection (what Alpaca does)
+instead of a reply with the existing order (what the `Venue` protocol asks of an adapter).
 
 This is a test double, not a simulator: it models the venue behaviors the order manager
 must survive, not prices or queues.
@@ -126,6 +129,9 @@ class FakeVenue:
     shorting_enabled: bool = False
     margin_multiplier: float = 1.0
     killed: bool = False  # True: place raises KillSwitchEngaged, as a real adapter would
+    # True: a repeated client order id is rejected, as Alpaca does. False: the existing
+    # order is returned, which is what the `Venue` protocol asks of an adapter.
+    reject_duplicate_ids: bool = False
 
     def __post_init__(self) -> None:
         if self.clock.tzinfo is None:
@@ -139,6 +145,7 @@ class FakeVenue:
         self._scripts: dict[str, OrderScript] = {}
         self._timeouts_left: dict[str, int] = {}
         self._failures: dict[str, int] = {}
+        self._lagging_lookups = 0
         self._next_id = 1
 
     # ------------------------------------------------------------------ test controls
@@ -171,6 +178,11 @@ class FakeVenue:
         """Script the next order whose client order id, or else symbol, is `key`."""
         self._scripts[key] = script
         self._timeouts_left[key] = script.timeouts_before_accept
+
+    def lag_lookups(self, times: int = 1) -> None:
+        """Make the next `times` `get_order` calls say "never seen", even for an order
+        that exists: a venue that has accepted an order but does not show it yet."""
+        self._lagging_lookups += times
 
     def fail_next(self, method: str, times: int = 1) -> None:
         """Make the next `times` calls to `method` raise VenueUnavailable before acting."""
@@ -220,6 +232,9 @@ class FakeVenue:
 
     def get_order(self, client_order_id: str) -> VenueOrderState | None:
         self._enter("get_order", client_order_id)
+        if self._lagging_lookups > 0:
+            self._lagging_lookups -= 1
+            return None
         found = self._orders.get(client_order_id)
         return found.state() if found is not None else None
 
@@ -231,6 +246,8 @@ class FakeVenue:
         self._enter("place", order.client_order_id)
         existing = self._orders.get(order.client_order_id)
         if existing is not None:
+            if self.reject_duplicate_ids:
+                raise VenueRejected("client_order_id must be unique")
             return existing.state()  # a duplicate client id is never a second order
 
         key = order.client_order_id if order.client_order_id in self._scripts else order.symbol

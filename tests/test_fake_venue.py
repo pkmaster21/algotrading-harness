@@ -376,3 +376,21 @@ def test_clock_only_moves_forward() -> None:
         v.set_now(PRE_OPEN - dt.timedelta(seconds=1))
     with pytest.raises(ValueError):
         FakeVenue(clock=dt.datetime(2024, 1, 3, 8, 0))
+
+
+def test_repeated_client_id_can_be_rejected_as_alpaca_does() -> None:
+    v = venue(reject_duplicate_ids=True)
+    v.place(buy())
+    with pytest.raises(VenueRejected, match="must be unique"):
+        v.place(buy())
+    assert len(v.open_orders()) == 1  # still one order
+
+
+def test_lagging_lookup_hides_an_accepted_order_for_a_while() -> None:
+    v = venue()
+    v.place(buy())
+    v.lag_lookups(2)
+    assert v.get_order("AAPL-e-a1") is None
+    assert v.get_order("AAPL-e-a1") is None
+    found = v.get_order("AAPL-e-a1")
+    assert found is not None and found.status == "pending"

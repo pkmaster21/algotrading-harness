@@ -33,8 +33,20 @@ from pydantic import Field, JsonValue, ValidationError
 
 from harness.models import FrozenModel
 
-# Later slices of the paper path add their own kinds (order intents, venue states, ...).
-JournalKind = Literal["ledger_open", "fill", "adjustment"]
+JournalKind = Literal[
+    # the ledger (harness/positions.py)
+    "ledger_open",
+    "fill",
+    "adjustment",
+    # the order manager (harness/orders.py)
+    "order_staged",
+    "order_intent",
+    "venue_state",
+    "attempt_void",
+    "order_unknown",
+    "entries_blocked",
+    "order_closed",
+]
 
 
 class JournalError(RuntimeError):

@@ -184,6 +184,8 @@ class ExecutionConfig(FrozenModel):
     session_deadline: dt.time  # anything still working is canceled
     poll_seconds: float = Field(gt=0, le=60)
     max_submit_attempts: int = Field(ge=1, le=10)
+    # How long a cancel may take to be confirmed by the venue before trading stops.
+    cancel_confirm_seconds: float = Field(gt=0, le=300)
     max_requests_per_minute: int = Field(ge=1, le=200)  # Alpaca allows 200
     cash_tolerance: float = Field(ge=0)  # dollars
     max_clock_skew_seconds: float = Field(gt=0)
