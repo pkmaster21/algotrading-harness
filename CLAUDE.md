@@ -31,8 +31,10 @@ not for routine strategy work.
   Any resulting order fills at the open of bar t+1, plus slippage and costs.
   Never fill on the signal bar.
 - **Determinism.** Same data + same config + same strategy = identical results.
-- **Holdout discipline.** Data on or after the holdout start date is off-limits unless
-  a backtest is explicitly run in holdout mode. Every holdout run is logged.
+- **Holdout discipline.** Data on or after the holdout start date is off-limits except
+  to a backtest explicitly run in holdout mode, or to the paper runner trading a frozen
+  profile. Both are logged, each in its own log (`HoldoutAccess` and `PaperAccess` in
+  `harness/data.py` are the only two ways past the cutoff).
 
 ## Scope (current)
 

@@ -218,12 +218,33 @@ class HoldoutAccess(FrozenModel):
     git_commit: str | None = None
 
 
+class PaperAccess(FrozenModel):
+    """Proof that the caller is paper trading a frozen profile.
+
+    Paper trading has to read up to yesterday's close every day, which is past the
+    holdout cutoff. This is the loader's second way to lift the cutoff, kept apart from
+    `HoldoutAccess` on purpose: a holdout run is a rare, deliberate spend of unseen data
+    and each one is logged; paper trading is daily and has its own log, one line per
+    profile per day, so the holdout log stays a short list a person reads.
+
+    Only the paper runner builds one, and only from a profile it has loaded and
+    verified. The id must look like a frozen profile's (`<name>-<8 hash characters>`).
+    """
+
+    profile_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.]*(-[A-Za-z0-9_.]+)*-[A-Za-z0-9]{8}$")
+
+
 class HoldoutViolation(RuntimeError):
     """A request for data on or after the cutoff was about to be made. Always a bug."""
 
 
 class HoldoutLogError(RuntimeError):
     """The holdout log could not be written, so no holdout data is returned."""
+
+
+class PaperLogError(RuntimeError):
+    """The paper access log could not be read or written, so no data past the cutoff is
+    returned."""
 
 
 class DataError(RuntimeError):
@@ -427,6 +448,7 @@ class _BarCache:
 # --------------------------------------------------------------------------- loader
 
 HOLDOUT_LOG_HEADER = ["timestamp_utc", "run_id", "strategy", "data_start", "data_end", "git_commit"]
+PAPER_LOG_HEADER = ["timestamp_utc", "day", "profile_id", "data_start", "data_end"]
 
 
 def _last_completed_session(now: dt.datetime) -> dt.date:
@@ -456,20 +478,31 @@ class DataLoader:
 
     # ------------------------------------------------------------------ cutoff
 
-    def cutoff(self, holdout: HoldoutAccess | None) -> dt.date:
-        """Exclusive end date. Without holdout access this is always the holdout start.
+    def cutoff(self, holdout: HoldoutAccess | None, paper: PaperAccess | None = None) -> dt.date:
+        """Exclusive end date. Without holdout or paper access this is always the holdout
+        start.
 
         This is the permission boundary. `load` additionally never goes past the last
-        completed session, whichever comes first.
+        completed session, whichever comes first. Paper access reaches the last completed
+        session whatever `holdout_end` says: that setting pins a holdout backtest's
+        window, and paper trading always needs yesterday's close.
         """
-        if holdout is None:
+        if holdout is not None and paper is not None:
+            raise ValueError("holdout access and paper access cannot be combined")
+        if holdout is None and paper is None:
             return self.dates.holdout_start
         last = _last_completed_session(self._now())
-        if self.dates.holdout_end is not None:
+        if holdout is not None and self.dates.holdout_end is not None:
             last = min(last, self.dates.holdout_end)
         return last + dt.timedelta(days=1)
 
-    def load(self, symbols: Sequence[str], *, holdout: HoldoutAccess | None = None) -> BarPanel:
+    def load(
+        self,
+        symbols: Sequence[str],
+        *,
+        holdout: HoldoutAccess | None = None,
+        paper: PaperAccess | None = None,
+    ) -> BarPanel:
         """Bars from `dates.data_start` through the last completed session before the
         cutoff, as a BarPanel.
 
@@ -479,11 +512,12 @@ class DataLoader:
         happened yet as cached, and they would stay missing until the next full refresh.
 
         With `holdout`, the holdout log line is appended first; if that fails, nothing
-        is loaded.
+        is loaded. With `paper`, the same goes for the paper access log, which gets one
+        line per profile per New York day however often that profile loads.
         """
         symbols = list(dict.fromkeys(symbols))  # dedupe, keep order
         start = self.dates.data_start
-        cutoff = self.cutoff(holdout)
+        cutoff = self.cutoff(holdout, paper)
         end = min(cutoff - dt.timedelta(days=1), _last_completed_session(self._now()))
         if end < start:
             raise DataError(
@@ -492,6 +526,8 @@ class DataLoader:
             )
         if holdout is not None:
             self._log_holdout(holdout, start, end)
+        if paper is not None:
+            self._log_paper(paper, start, end)
         self._refresh(symbols, start, end, cutoff)
         # Read through `end`, not the cutoff: never past the holdout boundary, and never a
         # row later than the range this load asked for.
@@ -521,6 +557,38 @@ class DataLoader:
                 os.fsync(fh.fileno())
         except OSError as exc:
             raise HoldoutLogError(f"could not append to holdout log {path}: {exc}") from exc
+
+    def _log_paper(self, access: PaperAccess, start: dt.date, end: dt.date) -> None:
+        """One line per profile per New York day. A log that cannot be read is treated
+        like one that cannot be written: no data past the cutoff."""
+        path = self.cfg.paper_access_log
+        now = self._now()
+        day = now.astimezone(MARKET_TZ).date().isoformat()
+        try:
+            logged = read_paper_access_log(path)
+            if any(
+                r.get("profile_id") == access.profile_id and r.get("day") == day for r in logged
+            ):
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            new = not path.exists()
+            with path.open("a", newline="") as fh:
+                writer = csv.writer(fh)
+                if new:
+                    writer.writerow(PAPER_LOG_HEADER)
+                writer.writerow(
+                    [
+                        now.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        day,
+                        access.profile_id,
+                        start.isoformat(),
+                        end.isoformat(),
+                    ]
+                )
+                fh.flush()
+                os.fsync(fh.fileno())
+        except (OSError, csv.Error, UnicodeDecodeError) as exc:
+            raise PaperLogError(f"could not update the paper access log {path}: {exc}") from exc
 
     # ------------------------------------------------------------------ cache refresh
 
@@ -622,6 +690,14 @@ def _overlap_matches(cached: pd.DataFrame, fetched: pd.DataFrame) -> bool:
         if (np.abs(c - n) > _OVERLAP_TOLERANCE * np.abs(c)).any():
             return False
     return True
+
+
+def read_paper_access_log(path: Path) -> list[dict[str, Any]]:
+    """Rows of the paper access log (empty if it does not exist)."""
+    if not path.exists():
+        return []
+    with path.open(newline="") as fh:
+        return list(csv.DictReader(fh))
 
 
 def read_holdout_log(path: Path) -> list[dict[str, Any]]:
