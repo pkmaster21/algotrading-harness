@@ -10,7 +10,7 @@ import pytest
 
 from harness.alerts import Alert
 from harness.broker.venue import KillSwitchEngaged, VenueOrderState, VenueUnavailable
-from harness.config import ExecutionConfig
+from harness.config import ExecutionConfig, RiskConfig
 from harness.journal import Journal, JournalKind, read_journal
 from harness.killswitch import KillSwitch
 from harness.models import Fill, Leg, OptionContract, Order, Side, Stock
@@ -22,6 +22,7 @@ from harness.orders import (
     order_id_for,
 )
 from harness.positions import Ledger, reconcile_venue
+from harness.risk import RiskManager, RiskState
 from tests.fake_venue import FakeVenue, FillStep, OrderScript, at
 
 PROFILE = "plumbing-0a1b2c3d"
@@ -47,6 +48,19 @@ CFG = ExecutionConfig.model_validate(
 )
 
 
+LOOSE = RiskConfig(
+    name="loose",
+    max_position_pct=1.0,
+    max_exposure_pct=1.0,
+    daily_loss_cap_pct=0.5,
+    max_drawdown_halt_pct=0.5,
+)
+
+
+def risk_manager(cfg: RiskConfig = LOOSE, state: RiskState | None = None) -> RiskManager:
+    return RiskManager(cfg, CFG.limits, CFG.entry_limit_pct, state or RiskState.initial(10_000.0))
+
+
 class Crash(BaseException):
     """The process died. Not an Exception, so no handler in the harness can swallow it."""
 
@@ -63,6 +77,15 @@ class CrashingJournal(Journal):
                 super().append(kind, payload)
             raise Crash(f"at record {self.crash_at} ({kind})")
         return super().append(kind, payload)
+
+
+class Tampering(FakeVenue):
+    """Base for venues that misreport an order: the list of open orders goes through
+    `get_order`, so a subclass that overrides `get_order` misreports it everywhere."""
+
+    def open_orders(self) -> list[VenueOrderState]:
+        states = [self.get_order(s.client_order_id) for s in super().open_orders()]
+        return [s for s in states if s is not None and not s.is_terminal]
 
 
 class Recorder:
@@ -98,9 +121,13 @@ class Rig:
         venue_class: type[FakeVenue] = FakeVenue,
         cancel_latency: float = 1.0,
         reject_duplicate_ids: bool = False,
+        risk: RiskManager | None = None,
+        max_positions: int = 10,
     ) -> None:
         self.holdings = {"AAPL": 10, "TSLA": 5} if holdings is None else holdings
         self.cfg = cfg
+        self.risk = risk or risk_manager()
+        self.max_positions = max_positions
         spent = sum(q * CLOSES[s] for s, q in self.holdings.items())
         self.venue = venue_class(
             clock=at(D1, 8, 0),
@@ -137,11 +164,12 @@ class Rig:
                 self.ledger.apply_fill(seed, quantity)
         self.om = OrderManager(
             self.venue, self.ledger, self.journal, self.kill, self.alerts, self.cfg, PROFILE,
-            sleep=self.venue.advance, now=lambda: self.venue.clock,
+            self.risk, self.max_positions, sleep=self.venue.advance, now=lambda: self.venue.clock,
         )  # fmt: skip
         if recover:
             self.om.recover()
-            self.om.set_closes(CLOSES)
+            if fresh:  # a restarted manager has the closes from its journal
+                self.om.set_closes(CLOSES)
 
     def restart(
         self, recover: bool = True, crash_at: int | None = None, crash_after_write: bool = False
@@ -243,10 +271,65 @@ def test_submit_refuses_the_whole_batch_if_one_order_is_bad(tmp_path: Path) -> N
         rig.om.set_closes({"AAPL": 0.0})
 
 
+def test_closes_are_journaled_and_survive_a_restart(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)  # the rig sets the closes once, on its first start
+    assert rig.kinds().count("closes") == 1
+    rig.om.set_closes(CLOSES)  # the same closes again: nothing new to record
+    assert rig.kinds().count("closes") == 1
+    rig.restart()  # a real restart: nobody hands the closes over again
+    assert rig.om.submit([order("MSFT", "buy", 3)]) == [E_MSFT]
+    assert rig.om.orders()[0].reference_price == 300.0
+    rig.om.set_closes({**CLOSES, "MSFT": 310.0})
+    assert rig.kinds().count("closes") == 2
+    rig.restart()
+    rig.om.submit([order("NVDA", "buy", 1), order("AAPL", "sell", 10)])
+    assert [o.reference_price for o in rig.om.orders()] == [300.0, 50.0, 100.0]
+
+
+def test_closes_must_cover_every_held_symbol(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)  # holds AAPL and TSLA
+    before = rig.kinds()
+    with pytest.raises(OrderManagerError, match="no close for held symbols: AAPL, TSLA"):
+        rig.om.set_closes({"MSFT": 300.0})
+    with pytest.raises(OrderManagerError, match="no close for held symbols: TSLA"):
+        rig.om.set_closes({"MSFT": 300.0, "AAPL": 100.0})
+    assert rig.kinds() == before
+    assert rig.om.submit([order("MSFT", "buy", 3)]) == [E_MSFT]  # the earlier closes stand
+
+
+def test_quiet_poll_costs_one_request_however_many_orders_are_working(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    for symbol in ("MSFT", "NVDA", "AMD"):
+        rig.venue.set_price(symbol, 1_000.0)  # above every cap: the entries rest
+    rig.om.submit([order("MSFT", "buy", 3), order("NVDA", "buy", 4), order("AMD", "buy", 2)])
+    rig.to(9, 31)
+    for order_id, limit in ((E_MSFT, 306.0), (E_NVDA, 51.0), (E_AMD, 153.0)):
+        rig.send_entry(order_id, limit)
+    rig.venue.calls.clear()
+    rig.om.refresh()
+    assert rig.venue.calls == [("open_orders", "")]
+    # An order that left the list is asked about by itself, and only that one.
+    rig.venue.set_price("AMD", 150.0)
+    rig.venue.calls.clear()
+    rig.om.refresh()
+    assert rig.venue.calls == [("open_orders", ""), ("get_order", E_AMD + "-a1")]
+    assert rig.phase(E_AMD) == "filled"
+    # If the list cannot be read, each order is asked about instead.
+    rig.venue.fail_next("open_orders")
+    rig.venue.calls.clear()
+    rig.om.refresh()
+    assert [m for m, _ in rig.venue.calls] == ["open_orders", "get_order", "get_order"]
+    rig.venue.calls.clear()
+    rig.om.cancel_all("session_deadline")
+    rig.om.refresh()  # nothing is working: no request at all
+    assert "open_orders" not in [m for m, _ in rig.venue.calls]
+
+
 def test_nothing_works_before_recover(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     rig.restart(recover=False)
     for call in (
+        lambda: rig.om.set_closes(CLOSES),
         lambda: rig.om.submit([order("AAPL", "sell", 10)]),
         lambda: rig.send_exit(X_AAPL),
         lambda: rig.om.refresh(),
@@ -683,7 +766,7 @@ def test_idle_order_can_be_closed_instead_of_resent(tmp_path: Path) -> None:
 
 
 def test_venue_rejecting_after_accepting_ends_the_order(tmp_path: Path) -> None:
-    class RejectsLater(FakeVenue):
+    class RejectsLater(Tampering):
         def get_order(self, client_order_id: str) -> VenueOrderState | None:
             state = super().get_order(client_order_id)
             assert state is not None
@@ -831,7 +914,7 @@ def test_cancel_of_an_unknown_order_that_is_at_the_venue(tmp_path: Path) -> None
 
 
 def test_venue_state_that_contradicts_the_order_kills(tmp_path: Path) -> None:
-    class WrongQuantity(FakeVenue):
+    class WrongQuantity(Tampering):
         def get_order(self, client_order_id: str) -> VenueOrderState | None:
             state = super().get_order(client_order_id)
             return state.model_copy(update={"quantity": 11}) if state else None
@@ -845,7 +928,7 @@ def test_venue_state_that_contradicts_the_order_kills(tmp_path: Path) -> None:
 
 
 def test_filled_quantity_that_goes_down_kills(tmp_path: Path) -> None:
-    class Shrinks(FakeVenue):
+    class Shrinks(Tampering):
         shrink = False
 
         def get_order(self, client_order_id: str) -> VenueOrderState | None:
@@ -868,7 +951,7 @@ def test_filled_quantity_that_goes_down_kills(tmp_path: Path) -> None:
 
 
 def test_venue_forgetting_an_order_it_reported_kills(tmp_path: Path) -> None:
-    class Forgets(FakeVenue):
+    class Forgets(Tampering):
         forget = False
 
         def get_order(self, client_order_id: str) -> VenueOrderState | None:
@@ -884,7 +967,7 @@ def test_venue_forgetting_an_order_it_reported_kills(tmp_path: Path) -> None:
 
 
 def test_fill_dated_on_the_signal_session_kills(tmp_path: Path) -> None:
-    class Backdated(FakeVenue):
+    class Backdated(Tampering):
         def get_order(self, client_order_id: str) -> VenueOrderState | None:
             state = super().get_order(client_order_id)
             assert state is not None
@@ -1044,7 +1127,9 @@ def test_journal_from_another_profile_or_out_of_step_with_the_ledger_is_refused(
     rig = Rig(tmp_path)
     rig.om.submit([order("AAPL", "sell", 10)])
     assert rig.journal is not None
-    other = OrderManager(rig.venue, rig.ledger, rig.journal, rig.kill, None, CFG, "other-99999999")
+    other = OrderManager(
+        rig.venue, rig.ledger, rig.journal, rig.kill, None, CFG, "other-99999999", rig.risk, 10
+    )
     with pytest.raises(OrderManagerError, match="does not replay"):
         other.recover()
     # A fill for a known order that the manager's attempts cannot account for.

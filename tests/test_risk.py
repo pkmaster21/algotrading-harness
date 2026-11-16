@@ -12,8 +12,17 @@ import pytest
 from harness.broker.sim import SimBroker
 from harness.config import OrderLimits, RiskConfig
 from harness.engine import simulate
-from harness.models import Action, Leg, OptionContract, Order, PortfolioSnapshot, Position, Stock
-from harness.risk import RiskManager, RiskState, RiskStateError, _whole_units
+from harness.models import (
+    AccountState,
+    Action,
+    Leg,
+    OptionContract,
+    Order,
+    PortfolioSnapshot,
+    Position,
+    Stock,
+)
+from harness.risk import RiskDecision, RiskManager, RiskState, RiskStateError, _whole_units
 from tests.fixture_strategies import BuyAndHold, Churn
 from tests.synthetic import COSTS, construction, make_panel
 
@@ -383,6 +392,163 @@ def test_unsupported_orders_and_bad_markup_raise() -> None:
         manager().review([order], snapshot, {})
     with pytest.raises(ValueError, match="entry_markup"):
         RiskManager(cfg(), LOOSE, -0.01, RiskState.initial(1.0))
+
+
+# --------------------------------------------------------------------------- release
+
+
+def release(
+    m: RiskManager,
+    order: Order,
+    cash: float,
+    holdings: Mapping[str, tuple[int, float]] | None = None,
+    *,
+    price: float = 102.0,
+    reserved: float = 0.0,
+    pending: int = 0,
+    max_positions: int = 10,
+) -> RiskDecision:
+    snapshot, marks = portfolio(cash, holdings)
+    account = AccountState(cash=cash, positions=snapshot.positions)
+    return m.review_release(
+        order,
+        account,
+        marks,
+        price=price,
+        reserved_cash=reserved,
+        pending_entries=pending,
+        max_positions=max_positions,
+    )
+
+
+def test_release_passes_an_entry_that_fits() -> None:
+    decision = release(manager(), buy("AAPL", 10), 10_000.0)
+    assert (decision.approved_quantity, decision.rule) == (10, None)
+
+
+@pytest.mark.parametrize(
+    ("cash", "reserved", "approved"),
+    [
+        (1_020.0, 0.0, 10),  # exactly enough
+        (1_019.99, 0.0, 9),  # one cent short of the tenth share
+        (1_020.0, 102.0, 9),  # cash an earlier entry has reserved is not there
+        (101.99, 0.0, 0),
+        (5_000.0, 5_000.0, 0),
+        (0.0, 0.0, 0),
+        (-50.0, 0.0, 0),
+    ],
+)
+def test_release_never_spends_cash_that_is_not_there(
+    cash: float, reserved: float, approved: int
+) -> None:
+    decision = release(manager(), buy("AAPL", 10), cash, {"MSFT": (10, 300.0)}, reserved=reserved)
+    assert decision.approved_quantity == approved
+    assert decision.rule == (None if approved == 10 else "no_leverage")
+    assert approved * 102.0 <= max(cash - reserved, 0.0)
+
+
+def test_release_holds_the_position_cap() -> None:
+    held = {"MSFT": (10, 300.0), "NVDA": (10, 50.0)}
+    m = manager()
+    assert release(m, buy("AAPL", 1), 5_000.0, held, max_positions=3).approved_quantity == 1
+    full = release(m, buy("AAPL", 1), 5_000.0, held, max_positions=2)
+    assert (full.approved_quantity, full.rule) == (0, "max_positions")
+    # An entry released earlier and not filled yet takes a slot too.
+    pending = release(m, buy("AAPL", 1), 5_000.0, held, max_positions=3, pending=1)
+    assert (pending.approved_quantity, pending.rule) == (0, "max_positions")
+
+
+def test_release_never_adds_to_a_held_position() -> None:
+    decision = release(manager(), buy("MSFT", 1), 5_000.0, {"MSFT": (10, 300.0)})
+    assert (decision.approved_quantity, decision.rule) == (0, "max_positions")
+    assert "already held" in decision.detail
+
+
+def test_release_applies_the_position_and_exposure_limits_to_actual_equity() -> None:
+    # Equity is 10,000: 4,000 in cash and 6,000 in MSFT.
+    held = {"MSFT": (20, 300.0)}
+    by_position = release(manager(cfg(position=0.1)), buy("AAPL", 50), 4_000.0, held)
+    assert (by_position.approved_quantity, by_position.rule) == (9, "max_position")  # 1,000 / 102
+    by_exposure = release(manager(cfg(position=0.8, exposure=0.8)), buy("AAPL", 50), 4_000.0, held)
+    assert (by_exposure.approved_quantity, by_exposure.rule) == (19, "max_exposure")  # 2,000 / 102
+    # Exposure already reserved by an earlier entry counts.
+    reserved = release(
+        manager(cfg(position=0.8, exposure=0.8)), buy("AAPL", 50), 4_000.0, held, reserved=1_000
+    )
+    assert (reserved.approved_quantity, reserved.rule) == (9, "max_exposure")
+    limits = OrderLimits(max_order_notional=500.0, max_orders_per_session=10)
+    by_notional = release(manager(limits=limits), buy("AAPL", 50), 4_000.0, held)
+    assert (by_notional.approved_quantity, by_notional.rule) == (4, "max_order_notional")
+
+
+def test_release_refuses_entries_while_halted_or_capped() -> None:
+    m = manager()
+    m.on_mark(D1, 8_000.0)  # a 20% fall: daily cap and drawdown halt
+    halted = release(m, buy("AAPL", 1, D1), 8_000.0)
+    assert (halted.approved_quantity, halted.rule) == (0, "drawdown_halt")
+    m.reset_halt()
+    capped = release(m, buy("AAPL", 1, D1), 8_000.0)
+    assert (capped.approved_quantity, capped.rule) == (0, "daily_loss_cap")
+
+
+def test_release_rejects_what_it_cannot_judge() -> None:
+    m = manager()
+    for price in (0.0, -1.0, float("nan"), float("inf")):
+        assert release(m, buy("AAPL", 1), 5_000.0, price=price).rule == "no_price"
+    snapshot, _ = portfolio(5_000.0, {"MSFT": (10, 300.0)})
+    account = AccountState(cash=5_000.0, positions=snapshot.positions)
+    for marks in ({}, {"MSFT": 0.0}, {"MSFT": float("nan")}):
+        unvalued = m.review_release(
+            buy("AAPL", 1), account, marks,
+            price=102.0, reserved_cash=0.0, pending_entries=0, max_positions=10,
+        )  # fmt: skip
+        assert (unvalued.approved_quantity, unvalued.rule) == (0, "no_price")
+    with pytest.raises(ValueError, match="exits are never gated"):
+        release(m, sell("MSFT", 1), 5_000.0, {"MSFT": (10, 300.0)})
+    option = Order(
+        created_on=D0, action="enter", quantity=1, strength=1.0,
+        legs=(Leg(instrument=OptionContract(underlying="AAPL", expiry=D3, strike=1, right="call"),
+                  side="buy"),),
+    )  # fmt: skip
+    with pytest.raises(NotImplementedError):
+        release(m, option, 5_000.0)
+
+
+def test_random_releases_never_breach_a_limit() -> None:
+    rng = random.Random(7)
+    for _ in range(2_000):
+        exposure_pct = rng.uniform(0.3, 1.0)
+        config = cfg(position=rng.uniform(0.05, exposure_pct), exposure=exposure_pct)
+        limits = OrderLimits(max_order_notional=rng.uniform(200, 20_000), max_orders_per_session=9)
+        m = manager(config, limits)
+        held = {s: (rng.randint(1, 40), rng.uniform(5, 400)) for s in rng.sample("BCDEF", 3)}
+        cash = rng.uniform(-500, 20_000)
+        reserved = rng.uniform(0, 3_000)
+        price = round(rng.uniform(1, 500), 2)
+        quantity = rng.randint(1, 300)
+        decision = release(m, buy("AAPL", quantity), cash, held, price=price, reserved=reserved)
+        approved = decision.approved_quantity
+        assert 0 <= approved <= quantity
+        exposure = sum(q * mark for q, mark in held.values())
+        equity = cash + exposure
+        cost = approved * price
+        if approved:
+            assert cost <= cash - reserved
+            assert cost <= config.max_position_pct * equity
+            assert exposure + reserved + cost <= config.max_exposure_pct * equity
+            assert cost <= limits.max_order_notional
+        if approved < quantity:
+            assert decision.rule is not None and decision.detail
+            # One more share would breach the limit that is named.
+            more = (approved + 1) * price
+            rooms = {
+                "no_leverage": cash - reserved,
+                "max_position": config.max_position_pct * equity,
+                "max_exposure": config.max_exposure_pct * equity - exposure - reserved,
+                "max_order_notional": limits.max_order_notional,
+            }
+            if decision.rule in rooms:
+                assert more > rooms[decision.rule]
 
 
 # --------------------------------------------------------------------------- properties

@@ -162,7 +162,7 @@ class RiskConfig(FrozenModel):
         return self
 
 
-_MARKET_OPEN = dt.time(9, 30)  # New York; the regular open, also on half days
+MARKET_OPEN = dt.time(9, 30)  # New York; the regular open, also on half days
 
 
 class OrderLimits(FrozenModel):
@@ -210,7 +210,7 @@ class ExecutionConfig(FrozenModel):
             raise ValueError("approval_deadline must be before session_deadline")
         # After the open no exit could go into the opening auction at all. The venue's
         # own auction cutoff is earlier still; the adapter checks against that.
-        if not self.opg_cutoff < _MARKET_OPEN:
+        if not self.opg_cutoff < MARKET_OPEN:
             raise ValueError("opg_cutoff must be before the 09:30 open")
         return self
 

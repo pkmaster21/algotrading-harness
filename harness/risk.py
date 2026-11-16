@@ -25,6 +25,11 @@ Limits on a buy, all measured at the worst-case entry price (the last close mark
 - `drawdown_halt`: once equity is `max_drawdown_halt_pct` below its peak, entries are
   rejected until an operator resets the halt.
 
+`review` runs at the close, on the orders construction built. In paper trading
+`review_release` runs again just before each entry is sent, against the account as it
+actually is after the exits, and adds `no_leverage` (the order fits in cash that is
+really there) and `max_positions`.
+
 The manager is deterministic and does no I/O. `RiskState` is everything it remembers
 between sessions, so the caller can persist it and rebuild the manager later.
 """
@@ -39,7 +44,15 @@ from typing import Literal
 from pydantic import Field
 
 from harness.config import OrderLimits, RiskConfig
-from harness.models import EngineEvent, EventKind, FrozenModel, Order, PortfolioSnapshot, Stock
+from harness.models import (
+    AccountState,
+    EngineEvent,
+    EventKind,
+    FrozenModel,
+    Order,
+    PortfolioSnapshot,
+    Stock,
+)
 
 RiskRule = Literal[
     "max_position",
@@ -50,6 +63,9 @@ RiskRule = Literal[
     "drawdown_halt",
     "not_held",
     "no_price",
+    # release only (paper trading): checked against the actual account before a send
+    "no_leverage",
+    "max_positions",
 ]
 
 
@@ -288,6 +304,89 @@ class RiskManager:
                 if d.approved_quantity > 0
             ),
             events=tuple(e for d in ordered if (e := self._event(d, portfolio.as_of)) is not None),
+        )
+
+    def review_release(
+        self,
+        order: Order,
+        account: AccountState,
+        marks: Mapping[str, float],
+        *,
+        price: float,
+        reserved_cash: float,
+        pending_entries: int,
+        max_positions: int,
+    ) -> RiskDecision:
+        """Paper trading only, just before an entry is sent: the same limits as `review`,
+        against the account as it actually is after the exits, plus two that only the
+        actual account can answer.
+
+        `price` is the entry's limit, the most a share can cost. `reserved_cash` is the
+        worst-case cost of entries already released and not yet filled, and
+        `pending_entries` is how many of those have no position yet. `marks` values the
+        positions held (the closes the orders were decided on).
+
+        - `no_leverage`: the order must fit in cash that is really there and not reserved.
+        - `max_positions`: positions held plus pending entries stay within the cap, so an
+          exit that did not fill cannot leave one position too many. A symbol that is
+          already held is also refused here: an entry never adds to a position.
+
+        A buy is shrunk to the largest whole quantity that satisfies every limit, or
+        rejected at zero. Anything that cannot be judged is rejected.
+        """
+        leg = order.legs[0] if len(order.legs) == 1 else None
+        if leg is None or not isinstance(leg.instrument, Stock) or leg.ratio != 1:
+            raise NotImplementedError("risk review supports one-leg stock orders only")
+        if leg.side != "buy":
+            raise ValueError("review_release is for entries; exits are never gated")
+
+        def reject(rule: RiskRule, detail: str) -> RiskDecision:
+            return RiskDecision(order=order, approved_quantity=0, rule=rule, detail=detail)
+
+        state, cfg = self._state, self._cfg
+        symbol = order.symbol
+        if state.halted:
+            return reject("drawdown_halt", state.halt_reason)
+        if state.entries_blocked_for == order.created_on:
+            return reject("daily_loss_cap", f"daily loss cap hit on {order.created_on}")
+        if not math.isfinite(price) or price <= 0:
+            return reject("no_price", f"no limit price for {symbol}")
+        if symbol in account.positions:
+            return reject("max_positions", f"{symbol} is already held")
+        if len(account.positions) + pending_entries >= max_positions:
+            return reject(
+                "max_positions",
+                f"{len(account.positions)} held and {pending_entries} pending, cap {max_positions}",
+            )
+        exposure = 0.0
+        for held, position in account.positions.items():
+            mark = marks.get(held)
+            if mark is None or not math.isfinite(mark) or mark <= 0:
+                return reject("no_price", f"no close to value the {held} position")
+            exposure += position.quantity * position.instrument.multiplier * mark
+        equity = account.cash + exposure
+        if not math.isfinite(equity) or equity <= 0:
+            return reject("max_exposure", f"equity is {equity}")
+
+        # Cash first: when it ties with another limit, cash is what names the decision.
+        rooms: tuple[tuple[RiskRule, float], ...] = (
+            ("no_leverage", account.cash - reserved_cash),
+            ("max_position", cfg.max_position_pct * equity),
+            ("max_exposure", cfg.max_exposure_pct * equity - exposure - reserved_cash),
+            ("max_order_notional", self._limits.max_order_notional),
+        )
+        quantity, rule, room = order.quantity, None, 0.0
+        for name, limit_room in rooms:
+            allowed = _whole_units(limit_room, price)
+            if allowed < quantity:
+                quantity, rule, room = allowed, name, limit_room
+        if rule is None:
+            return RiskDecision(order=order, approved_quantity=quantity)
+        return RiskDecision(
+            order=order,
+            approved_quantity=quantity,
+            rule=rule,
+            detail=f"buy {order.quantity} cut to {quantity}: {room:.2f} of room at {price:.4f}",
         )
 
     # ------------------------------------------------------------------ helpers
