@@ -315,6 +315,18 @@ def test_latch_engaged_makes_place_raise_without_any_request(rig: Rig) -> None:
     assert rig.session.calls == []
 
 
+def test_the_flatten_pass_lets_a_sell_through_the_latch_and_never_a_buy(rig: Rig) -> None:
+    rig.kill.engage("test", "operator:cli")
+    rig.session.on("POST", "/v2/orders", body=order_json())
+    with rig.kill.flattening():
+        assert rig.broker.place(exit_order()).client_order_id == "0a1b2c3d-20240102-AAPL-x-a1"
+        with pytest.raises(KillSwitchEngaged):
+            rig.broker.place(entry_order())
+    assert len(rig.session.calls) == 1  # the sell; the buy never left
+    with pytest.raises(KillSwitchEngaged):
+        rig.broker.place(exit_order())
+
+
 def test_latched_place_does_not_even_wait_for_the_rate_limiter(tmp_path: Path) -> None:
     rig = Rig(tmp_path, max_per_minute=1)
     rig.session.on("GET", "/v2/account", body=ACCOUNT)

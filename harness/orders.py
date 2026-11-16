@@ -9,7 +9,9 @@ How a duplicate order is made impossible:
 
 - **Ids come from the decision, not from time or a counter.** An order's id is
   `<profile tag>-<signal date>-<SYMBOL>-<e|x>`; a venue attempt appends `-a1`, `-a2`.
-  The same decision always yields the same id.
+  The same decision always yields the same id. (An operator's flatten order ends in
+  `f1`, `f2`, ... instead: the number is part of the staged order, so the id is still a
+  function of what the journal holds.)
 - **Write-ahead journal.** The intent to send an attempt is journaled and fsynced before
   the network call, so a restart knows what may be at the venue.
 - **Lookup before resend.** After a timeout the attempt is looked up by its client id.
@@ -68,6 +70,7 @@ from harness.models import (
     AccountState,
     Fill,
     FrozenModel,
+    Leg,
     Order,
     OrderUpdate,
     OrderUpdateReason,
@@ -88,6 +91,9 @@ ClosedStatus = Literal["canceled", "rejected", "expired"]
 TERMINAL_PHASES: frozenset[OrderPhase] = frozenset({"filled", "canceled", "rejected", "expired"})
 
 _PROFILE_TAG = re.compile(r"^[A-Za-z0-9]{8}$")
+# The `reason` of an order staged by the operator's flatten command: the n-th such sell
+# of one symbol for one session. No strategy order has it.
+_FLATTEN_REASON = re.compile(r"^operator:flatten:([1-9][0-9]*)$")
 _SOURCE = "auto:orders"
 
 
@@ -135,6 +141,14 @@ def approval_hash(order_id: str, symbol: str, side: Side, quantity: int, limit: 
     return hashlib.sha256(json.dumps(terms).encode()).hexdigest()
 
 
+class FlattenResult(FrozenModel):
+    """What `OrderManager.flatten` did."""
+
+    order_ids: tuple[str, ...]  # the sells, one per position sold
+    # Where the ledger and the venue disagreed about a position, and what was sold.
+    differences: tuple[str, ...]
+
+
 class WorkingOrder(FrozenModel):
     """Order-manager state for one order. Rebuilt from the journal after a restart."""
 
@@ -177,10 +191,23 @@ def id_symbol(symbol: str) -> str:
     return f"{letters}x{hashlib.sha256(symbol.encode()).hexdigest()[:4]}"
 
 
+def flatten_number(order: Order) -> int | None:
+    """n if `order` is the n-th sell the operator's flatten command staged for its
+    symbol and session; None for an order that came from a decision."""
+    if order.action != "exit":
+        return None
+    match = _FLATTEN_REASON.match(order.reason)
+    return int(match.group(1)) if match else None
+
+
 def order_id_for(profile_id: str, order: Order) -> str:
     """The id of `order` under `profile_id`: a function of the decision only."""
     tag = profile_tag(profile_id)
-    kind = "e" if order.action == "enter" else "x"
+    number = flatten_number(order)
+    if number is not None:
+        kind = f"f{number}"  # never the id of the strategy's own exit of that session
+    else:
+        kind = "e" if order.action == "enter" else "x"
     return f"{tag}-{order.created_on:%Y%m%d}-{id_symbol(order.symbol)}-{kind}"
 
 
@@ -356,7 +383,7 @@ class OrderManager(Broker):
         Allowed when nothing of the order is at the venue (`staged`, `idle`) or when its
         last attempt's outcome is `unknown`, in which case the attempt is looked up
         first and adopted if it exists. Raises KillSwitchEngaged, sending nothing, if
-        the latch is set.
+        the latch is set (a sell inside `KillSwitch.flattening()` is the one exception).
         """
         self._require_recovered()
         tracked = self._get(order_id)
@@ -370,7 +397,7 @@ class OrderManager(Broker):
         is_entry = tracked.order.action == "enter"
         if is_entry and tracked.order.created_on in self._blocked:
             raise OrderManagerError(f"entries are blocked; order {order_id} cannot be sent")
-        self._kill.check()
+        self._kill.check(selling=tracked.side == "sell")
 
         if tracked.side == "sell":
             held = self._ledger.account().positions.get(tracked.order.symbol)
@@ -440,7 +467,7 @@ class OrderManager(Broker):
         for tried in range(self._cfg.max_submit_attempts):
             if tried:
                 self._sleep(self._cfg.poll_seconds * tried)
-            self._kill.check()
+            self._kill.check(selling=tracked.side == "sell")
             if lookup_first:
                 try:
                     found = self._venue.get_order(client_id)
@@ -1076,6 +1103,192 @@ class OrderManager(Broker):
         if decision.approved_quantity < tracked.quantity:
             self._reduce(tracked, decision)
         self.send(tracked.order_id, session, type="limit", time_in_force="day", limit_price=limit)
+
+    # ------------------------------------------------------------------ flatten
+
+    def flatten(self, session: dt.date, decided_on: dt.date, until: dt.datetime) -> FlattenResult:
+        """The operator's flatten: sell every share the ledger holds, in `session`.
+        Runs with the kill switch engaged (the caller engages it first), and sends
+        sells only.
+
+        `decided_on` is the session before `session` (what the orders are dated, so a
+        fill is always in a later session than its order). `until` is when to stop
+        trying.
+
+        1. Everything still open is canceled and confirmed first (`flatten`), so no
+           entry can fill behind the sells and no other sell holds the shares.
+        2. The ledger is compared with the venue's positions. Where the venue holds
+           fewer shares than the ledger, only the venue's are sold (the venue would
+           reject a sell for more, and then none of the position would be sold). Every
+           difference is named in the result and in a critical alert; the ledger is
+           not corrected here (`accept_broker_state` does that).
+        3. One sell is staged per position and worked as the open workflow works an
+           exit: into the opening auction before `opg_cutoff`, as a market `day` order
+           after it, sent again if an attempt ends with shares left.
+        4. At `until` whatever is still working is canceled and confirmed, and each
+           sell that did not fill in full is a critical alert.
+
+        The sells go through `send` like any exit: journaled before the venue is
+        called, never for more than the ledger holds. Only the latch check differs, and
+        only for sells (`KillSwitch.flattening`).
+
+        A kill from anywhere else stops it: the latch is read on every pass, and once
+        it is not the latch this flatten started under, the sells are canceled and
+        SessionIncomplete is raised. A kill reports what it canceled, and nothing is
+        sent after that report.
+
+        The sells count against `max_orders_per_session` like any other order. If the
+        session's orders have used the cap up, the next send stops everything
+        (SessionIncomplete, as elsewhere) with positions still held: sell those at the
+        broker and record it with `accept_broker_state`.
+        """
+        self._require_recovered()
+        if decided_on >= session:
+            raise LookAheadError(f"a flatten in session {session} cannot be dated {decided_on}")
+        if not self._kill.engaged():
+            raise OrderManagerError("a flatten runs with the kill switch engaged; engage it first")
+        self._sync_clock()
+        today = self._time().astimezone(MARKET_TZ).date()
+        if today != session:
+            raise OrderManagerError(f"session {session} is not today ({today} in New York)")
+        live = [t for t in self._orders.values() if t.phase not in TERMINAL_PHASES]
+        self._pull(live, lambda tracked: "flatten")
+
+        ledger = self._ledger.account().positions
+        at_venue = self._venue_quantities()
+        differences: list[str] = []
+        if at_venue is None:
+            differences.append(
+                "the venue's positions could not be read; selling what the ledger holds"
+            )
+        else:
+            for symbol in sorted(set(ledger) | set(at_venue)):
+                ours = ledger[symbol].quantity if symbol in ledger else 0
+                theirs = at_venue.get(symbol, 0)
+                if ours != theirs:
+                    selling = max(min(ours, theirs), 0)
+                    differences.append(
+                        f"{symbol}: ledger holds {ours}, venue holds {theirs}; selling {selling}"
+                    )
+        if differences:
+            self._alert(
+                "critical",
+                "flatten_mismatch",
+                "flatten: the ledger and the venue differ ("
+                + "; ".join(differences)
+                + "). Only shares both hold are sold. Settle the rest at the broker and "
+                "record it with accept_broker_state.",
+            )
+
+        # From here on orders may be open at the venue again. A kill run by anyone else
+        # changes the latch back, and the loop below stops when it sees that.
+        latch = self._kill.orders_sent()
+        if not latch.engaged or latch.at is None or latch.cancel_confirmed:
+            # Without the note a kill from elsewhere would leave the latch file as it
+            # is, and this flatten would send after that kill reported its cancel.
+            raise OrderManagerError(
+                "flatten refused, nothing was sent: the kill latch could not be marked "
+                f"'orders may be open' (it reads: {latch.reason or 'no reason'}). Check "
+                "that the latch file can be written, or reset the kill switch, and try again"
+            )
+
+        sells: list[_Tracked] = []
+        for symbol, held in sorted(ledger.items()):
+            quantity = held.quantity
+            if at_venue is not None:
+                quantity = max(min(quantity, at_venue.get(symbol, 0)), 0)
+            if quantity == 0:
+                continue
+            earlier = sum(
+                1
+                for t in self._orders.values()
+                if t.order.created_on == decided_on
+                and t.order.symbol == symbol
+                and flatten_number(t.order) is not None
+            )
+            order = Order(
+                created_on=decided_on,
+                action="exit",
+                legs=(Leg(instrument=held.instrument, side="sell"),),
+                quantity=quantity,
+                reason=f"operator:flatten:{earlier + 1}",
+            )
+            _check_supported(order)
+            order_id = order_id_for(self._profile_id, order)
+            # The close the position was last valued at; one adopted by an adjustment
+            # since then has none, and its cost stands in.
+            reference = self._closes.get(symbol, held.avg_price)
+            self._journal.append(
+                "order_staged",
+                {
+                    "order_id": order_id,
+                    "order": order.model_dump(mode="json"),
+                    "reference_price": reference,
+                    "approval": "none",
+                },
+            )
+            tracked = self._orders[order_id] = _Tracked(order_id, order, reference)
+            sells.append(tracked)
+
+        def at(time_of_day: dt.time) -> dt.datetime:
+            return dt.datetime.combine(session, time_of_day, MARKET_TZ)
+
+        open_at, opg_cutoff = at(MARKET_OPEN), at(self._cfg.opg_cutoff)
+        exit_deadline = at(self._cfg.exit_deadline)
+        sends: dict[str, int] = {}
+        stopped = False
+        with self._kill.flattening():
+            while True:
+                if self._kill.on_disk() != latch:
+                    stopped = True
+                    break
+                now = self._time()
+                if now >= until:
+                    break
+                if now >= open_at:
+                    self.refresh()
+                for tracked in sells:
+                    self._work_exit(tracked, session, sends, now < opg_cutoff, now >= exit_deadline)
+                if all(t.phase in TERMINAL_PHASES for t in sells):
+                    break
+                self._sleep(max(min(self._cfg.poll_seconds, (until - now).total_seconds()), 0.001))
+        self._pull(sells, lambda tracked: "kill_switch" if stopped else "flatten")
+        if stopped:
+            message = (
+                "the kill switch was engaged again or reset while a flatten was running; "
+                "the flatten stopped and its unfilled sells are canceled"
+            )
+            self._alert("critical", "flatten_stopped", message + ". Positions may remain.")
+            raise SessionIncomplete(message)
+        self._kill.confirm_cancel()  # nothing of the flatten is left at the venue
+        for tracked in sells:
+            if tracked.phase != "filled":
+                self._alert(
+                    "critical",
+                    "flatten_unfilled",
+                    f"flatten: {tracked.order_id} ended {tracked.phase} with {tracked.remaining} "
+                    f"of {tracked.quantity} {tracked.order.symbol} unsold; the position remains",
+                )
+        return FlattenResult(
+            order_ids=tuple(t.order_id for t in sells), differences=tuple(differences)
+        )
+
+    def _venue_quantities(self) -> dict[str, int] | None:
+        """Shares per symbol at the venue, or None if it cannot be asked."""
+        for tried in range(self._cfg.max_submit_attempts):
+            if tried:
+                self._sleep(self._cfg.poll_seconds)
+            try:
+                positions = self._venue.positions()
+            except (VenueDataError, ValidationError) as exc:
+                self._violation(f"the venue's data cannot be trusted: {exc}")
+            except Exception:
+                continue
+            quantities: dict[str, int] = {}
+            for position in positions:
+                quantities[position.symbol] = quantities.get(position.symbol, 0) + position.quantity
+            return quantities
+        return None
 
     # ------------------------------------------------------------------ approval
 

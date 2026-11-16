@@ -10,17 +10,21 @@ and so that it survives a crash or reboot. Everything about it fails closed:
 - Only an operator `reset` clears it. Nothing in the harness resets it automatically.
 
 The kill switch never sells. It cancels orders and stops; flattening is a separate,
-confirmed operator command (D6).
+confirmed operator command (D6). That command is the one thing allowed past a set latch:
+inside `KillSwitch.flattening()` a sell passes `check`, and nothing else does. The pass
+lives in memory on the one `KillSwitch` object the command built, so no other process
+and no other object has it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import os
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from pydantic import AwareDatetime, ValidationError
@@ -54,6 +58,7 @@ class KillSwitch:
         self.path = path
         self._now = now
         self._latched: KillState | None = None  # set when this process engaged the switch
+        self._sells_pass = False  # True only inside `flattening()`
 
     def engaged(self) -> bool:
         """True if the latch exists or cannot be read. Fails closed."""
@@ -67,10 +72,27 @@ class KillSwitch:
             return True
         return True
 
-    def check(self) -> None:
-        """Raise KillSwitchEngaged if the latch is set. Call before anything that sends."""
+    def check(self, *, selling: bool = False) -> None:
+        """Raise KillSwitchEngaged if the latch is set. Call before anything that sends.
+
+        `selling` says the order about to be sent is a sell. It makes no difference
+        except inside `flattening()`, where a sell passes a set latch."""
+        if selling and self._sells_pass:
+            return
         if self.engaged():
             raise KillSwitchEngaged(f"kill latch {self.path} is set")
+
+    @contextlib.contextmanager
+    def flattening(self) -> Iterator[None]:
+        """Let sells through this object's `check` while the block runs, latch or no
+        latch. For the operator's `flatten` command only: the order manager still
+        refuses a sell larger than the position, so what passes can only reduce risk.
+        Buys are refused as ever."""
+        self._sells_pass = True
+        try:
+            yield
+        finally:
+            self._sells_pass = False
 
     def state(self) -> KillState:
         """Who engaged the latch, when and why. Always agrees with `engaged`: a latch
@@ -126,12 +148,32 @@ class KillSwitch:
         If an operator resets the switch between the read and the write here, the write
         sets the latch again. That is the safe direction, and the window is milliseconds.
         """
-        state = self.state()
+        return self._note_cancel(True)
+
+    def orders_sent(self) -> KillState:
+        """Record in the latch that orders may be open at the venue again: the
+        operator's flatten is about to send sells past it. A kill run after this
+        cancels them and confirms, which sets the note back. That change is how a
+        running flatten learns it has been stopped (`on_disk`).
+
+        Returns what the latch file holds afterwards, from the one read made before the
+        write. The caller must look at it: if the note could not be written, or the
+        file is not a readable latch, the result does not say "engaged, cancel not
+        confirmed", and a later kill would then leave the file as it is."""
+        return self._note_cancel(False, self.on_disk())
+
+    def on_disk(self) -> KillState:
+        """What the latch file says now, whatever this object remembers: a process that
+        engaged the switch itself would otherwise never see another process reset it."""
+        return KillSwitch(self.path, self._now).state()
+
+    def _note_cancel(self, value: bool, state: KillState | None = None) -> KillState:
+        state = state if state is not None else self.state()
         if not state.engaged or state.at is None:  # not engaged, or an unreadable latch
             return state
-        confirmed = state.model_copy(update={"cancel_confirmed": True})
+        confirmed = state.model_copy(update={"cancel_confirmed": value})
         if self._latched is not None:
-            self._latched = self._latched.model_copy(update={"cancel_confirmed": True})
+            self._latched = self._latched.model_copy(update={"cancel_confirmed": value})
         try:
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name, suffix=".tmp")
             try:

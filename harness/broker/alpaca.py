@@ -305,7 +305,7 @@ class AlpacaBroker:
 
     def place(self, order: VenueOrder) -> VenueOrderState:
         """Send one order. The latch is read last, immediately before the request."""
-        self._kill.check()
+        self._kill.check(selling=order.side == "sell")
         self._limiter.acquire()  # may sleep, so the latch is read again after it
         side = OrderSide.BUY if order.side == "buy" else OrderSide.SELL
         tif = AlpacaTimeInForce.OPG if order.time_in_force == "opg" else AlpacaTimeInForce.DAY
@@ -326,7 +326,7 @@ class AlpacaBroker:
                 time_in_force=tif,
                 client_order_id=order.client_order_id,
             )
-        self._kill.check()
+        self._kill.check(selling=order.side == "sell")
         try:
             raw = self._call(
                 lambda: self._client.submit_order(request), throttle=False, placing=True

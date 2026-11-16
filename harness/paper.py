@@ -83,7 +83,7 @@ from typing import Any, Literal, NoReturn
 
 import numpy as np
 import yaml
-from pydantic import JsonValue
+from pydantic import AwareDatetime, JsonValue
 
 from harness.alerts import Alert, Alerter, Alerters, JsonlAlerter, LogAlerter, Severity, send_alert
 from harness.broker.alpaca import AlpacaBroker
@@ -110,6 +110,7 @@ from harness.orders import (
     SessionIncomplete,
     StagedOrderChanged,
     WorkingOrder,
+    flatten_number,
 )
 from harness.paper_report import PAPER_TRADE_COLUMNS, paper_report, unpriced_fills
 from harness.positions import Ledger, LedgerError, PnL, ReconcileReport, reconcile_venue
@@ -146,6 +147,8 @@ TRADES_FILE = "trades.csv"
 SUMMARY_FILE = "summary.json"
 SNAPSHOT_FILE = "config_snapshot.yaml"
 PENDING_FILE = "pending_approvals.json"
+ORDERS_FILE = "orders.json"
+LAST_RUN_FILE = "last_run.json"
 INBOX_DIR = "inbox"
 LOG_DIR = "logs"
 # How far back the venue's calendar is read to find the session before today. Longer
@@ -176,6 +179,19 @@ class DayReport(FrozenModel):
     reconcile_after: ReconcileReport | None = None
     pnl: PnL | None = None
     alerts: tuple[Alert, ...] = ()
+
+
+class LastRun(FrozenModel):
+    """`last_run.json`: how the runner's latest run ended, for `harness.service`."""
+
+    finished_at: AwareDatetime
+    report: DayReport
+
+
+def write_orders(folder: Path, orders: Sequence[WorkingOrder]) -> None:
+    """`orders.json`: every order the order manager knows, as of now. Only the process
+    that holds the order manager can write it; readers get the last snapshot."""
+    _write_atomic(folder / ORDERS_FILE, _json([o.model_dump(mode="json") for o in orders]))
 
 
 class _End(Exception):
@@ -325,7 +341,7 @@ class _Day:
         orders: tuple[WorkingOrder, ...] = ()
         if self.om is not None and self.decided_on is not None:
             orders = tuple(o for o in self.om.orders() if o.order.created_on == self.decided_on)
-        return DayReport(
+        report = DayReport(
             profile_id=self.profile_id,
             session=self.session,
             decided_on=self.decided_on,
@@ -337,6 +353,21 @@ class _Day:
             pnl=self.pnl,
             alerts=tuple(self.sent),
         )
+        self._write_last_run(report)
+        return report
+
+    def _write_last_run(self, report: DayReport) -> None:
+        """How the run ended and the orders as they are now, for readers
+        (`harness.service`). Written however the day ended; not needed to trade, so a
+        failure here is a warning."""
+        try:
+            if self.om is not None:
+                write_orders(self.folder, self.om.orders())
+            finished = self.now().astimezone(dt.UTC)
+            last = LastRun(finished_at=finished, report=report)
+            _write_atomic(self.folder / LAST_RUN_FILE, last.model_dump_json(indent=2).encode())
+        except Exception as exc:
+            self._alert("warn", "state", f"{LAST_RUN_FILE} or {ORDERS_FILE} was not written: {exc}")
 
     def _guarded(self) -> Outcome:
         try:
@@ -719,7 +750,13 @@ class _Day:
         fields = {f: panel.field(f)[:, cols] for f in PRICE_FIELDS}
         for i, session in enumerate(panel.dates[:-1]):
             engine.warm_up(session, {f: fields[f][i] for f in PRICE_FIELDS})
-        staged_before = {o.order_id for o in om.orders() if o.order.created_on == t}
+        # What an earlier attempt at this decision staged. An operator's flatten order
+        # carries the same date and was never the strategy's to decide again.
+        staged_before = {
+            o.order_id
+            for o in om.orders()
+            if o.order.created_on == t and flatten_number(o.order) is None
+        }
         try:
             engine.on_session_close(t, {f: fields[f][-1] for f in PRICE_FIELDS})
         except RiskStateError as exc:
@@ -823,10 +860,11 @@ class _Day:
         return panel
 
     def _write_pending(self, om: OrderManager, today: dt.date) -> None:
-        """The entries waiting for approval, where an operator's tools can read them:
-        only this process holds the order manager."""
+        """The entries waiting for approval and every order as it stands, where an
+        operator's tools can read them: only this process holds the order manager."""
         pending = [r.model_dump(mode="json") for r in om.pending_approvals(today)]
         _write_atomic(self.folder / PENDING_FILE, _json(pending))
+        write_orders(self.folder, om.orders())
 
     def _write_snapshot(self, profile: FrozenProfile, commit: str | None) -> None:
         """Every value the day runs with, the whole of the execution settings included."""
