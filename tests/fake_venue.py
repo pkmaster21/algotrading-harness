@@ -38,6 +38,7 @@ from harness.broker.venue import (
     KillSwitchEngaged,
     MarketSession,
     VenueAccount,
+    VenueDataError,
     VenueOrder,
     VenueOrderState,
     VenuePosition,
@@ -128,6 +129,9 @@ class FakeVenue:
     trading_blocked: bool = False
     shorting_enabled: bool = False
     margin_multiplier: float = 1.0
+    # The account setting that forbids shorts. Separate from `shorting_enabled` on
+    # purpose: at Alpaca the account field may stay true with the setting on.
+    no_shorting: bool = True
     killed: bool = False  # True: place raises KillSwitchEngaged, as a real adapter would
     # True: a repeated client order id is rejected, as Alpaca does. False: the existing
     # order is returned, which is what the `Venue` protocol asks of an adapter.
@@ -218,6 +222,20 @@ class FakeVenue:
             shorting_enabled=self.shorting_enabled,
             margin_multiplier=self.margin_multiplier,
         )
+
+    def verify_account(self) -> VenueAccount:
+        account = self.account()
+        self.calls[-1] = ("verify_account", "")
+        problems = []
+        if account.trading_blocked:
+            problems.append("the account is blocked from trading")
+        if not self.no_shorting:
+            problems.append("shorting is allowed; set no_shorting")
+        if account.margin_multiplier != 1:
+            problems.append(f"the margin multiplier is {account.margin_multiplier:g}")
+        if problems:
+            raise VenueDataError("the account is not set up safely: " + "; ".join(problems))
+        return account
 
     def positions(self) -> list[VenuePosition]:
         self._enter("positions")

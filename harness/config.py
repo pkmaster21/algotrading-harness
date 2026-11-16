@@ -198,6 +198,10 @@ class ExecutionConfig(FrozenModel):
     cash_tolerance: float = Field(ge=0)  # dollars
     max_clock_skew_seconds: float = Field(gt=0)
     limits: OrderLimits
+    # Where frozen profiles and paper trading state live. Relative paths resolve against
+    # the project root, like the data paths.
+    profiles_dir: Path
+    state_dir: Path
 
     @field_validator(
         "approval_deadline", "opg_cutoff", "exit_deadline", "session_deadline", mode="before"
@@ -263,6 +267,7 @@ _PATH_FIELDS = {
     "data": ("cache_dir", "holdout_log", "paper_access_log"),
     "backtest": ("output_dir",),
 }
+_EXECUTION_PATH_FIELDS = ("profiles_dir", "state_dir")
 
 # config/ sits at the project root, next to harness/.
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -303,9 +308,11 @@ def _resolve_paths(section: dict[str, Any], keys: tuple[str, ...], root: Path) -
 
 def load_execution(config_dir: Path = DEFAULT_CONFIG_DIR) -> ExecutionConfig:
     """The fixed execution settings in `config_dir`/execution.yaml."""
-    path = config_dir.resolve() / "execution.yaml"
+    config_dir = config_dir.resolve()
+    path = config_dir / "execution.yaml"
+    raw = _resolve_paths(_read_yaml(path), _EXECUTION_PATH_FIELDS, config_dir.parent)
     try:
-        return ExecutionConfig.model_validate(_read_yaml(path))
+        return ExecutionConfig.model_validate(raw)
     except ValidationError as exc:
         raise ConfigError(f"invalid config in {path}:\n{exc}") from exc
 

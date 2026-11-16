@@ -24,3 +24,6 @@ strategies/*
 !strategies/example_buy_and_hold.py
 config/strategies/*
 !config/strategies/example_buy_and_hold.yaml
+
+# Frozen profiles (gitignored like strategies; a plumbing profile is made locally)
+profiles/

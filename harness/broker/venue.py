@@ -175,6 +175,13 @@ class Venue(Protocol):
 
     def account(self) -> VenueAccount: ...
 
+    def verify_account(self) -> VenueAccount:
+        """Startup gate: the account as `account` reports it, once the venue has checked
+        that it is set up safely (it can trade, cannot short and cannot borrow). Raises
+        VenueDataError otherwise. How that is checked is the venue's business: the
+        account's own flags may not tell (Alpaca's are settings, read separately)."""
+        ...
+
     def positions(self) -> list[VenuePosition]: ...
 
     def open_orders(self) -> list[VenueOrderState]:

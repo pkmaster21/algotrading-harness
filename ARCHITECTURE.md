@@ -51,7 +51,7 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/engine.py` | Daily loop; hands strategies a past-only view; fills at next open | 1 |
 | `harness/broker/base.py` | Broker interface shared by all adapters | 1 |
 | `harness/broker/sim.py` | Simulated fills for backtests | 1 |
-| `harness/broker/venue.py` | Venue protocol: place, report and cancel single orders. Its models refuse order shapes the harness never sends (a buy that is not a limit order, fractional shares) | 2 |
+| `harness/broker/venue.py` | Venue protocol: place, report and cancel single orders, and `verify_account`, the setup gate. Its models refuse order shapes the harness never sends (a buy that is not a limit order, fractional shares) | 2 |
 | `harness/run.py` | `run_backtest(recipe)` function plus a thin CLI over it; loads strategies by name, checks their imports | 1 |
 | `harness/report.py` | Run outputs with a fixed schema, the resolved recipe per run, metrics, SPY benchmark, run index | 1 |
 | `harness/indicators.py` | Indicator calculations (SMA, RSI, ...) from past bars only; each addition is reviewed with a look-ahead test | Rules |
@@ -60,6 +60,7 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/positions.py` | Ledger: cash, positions and realized P&L, built only from journaled fills and operator adjustments. Reconciliation against the broker, which compares and never corrects | 2 |
 | `harness/journal.py` | Append-only, fsynced event log; the source of truth for paper trading state. The writer holds an exclusive file lock | 2 |
 | `harness/broker/alpaca.py` | `AlpacaBroker`: the venue for the Alpaca paper account, and the only trading network code. No mode or URL argument; sorts every failure into rejected, unknown, or untrustworthy | 2 |
+| `harness/profiles.py` | Frozen profiles: a validated run frozen into values (recipe, execution settings, strategy source hash) under an id that is its content hash. Promotion refuses a run that is not ready (dirty tree, no risk preset, no holdout run, strategy keeps state across sessions); loading verifies the profile file and its frozen copy of the strategy, which is what trades (`strategies/` can keep changing); activation binds the flat, venue-verified paper account to one profile, records it, and seeds its risk state. The one place a `PaperAccess` is built | 2 |
 | `harness/pricing.py` | Implied volatility and Greeks | Options |
 
 Each component starts as the simplest rule that works and is upgraded only when
@@ -295,6 +296,13 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   are approved as recommended, including the reworded one-code-path rule in `CLAUDE.md`.
   Existing Decision log entries that paper trading changes (section 0.5 of that doc) are
   reworded in the PR that implements each change, not before.
+- **A profile is its content (2026-11-16):** what paper trading runs is a `FrozenProfile`
+  whose id ends in the first 8 characters of a hash over every field, with the strategy
+  source copied beside it. The copy is what trades: the runner imports it from the
+  profile folder, so the module in `strategies/` can keep changing while a profile is
+  paper trading. Editing the profile file or the copy makes the profile fail to load;
+  there is no "update a profile", only promoting a new one. All profiles are gitignored, the plumbing one included: a profile holds the
+  machine's absolute paths and its creation time, so it is made where it trades.
 
 ## Open questions
 
