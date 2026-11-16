@@ -52,7 +52,7 @@ alerts, to `alerts.jsonl`.
 | Status | Meaning |
 |---|---|
 | 0 | The command did what it says. |
-| 1 | It ran, and something is left for you: `kill` could not confirm the cancel, or `flatten` left a position or a reconciliation difference. Read the output. |
+| 1 | It ran, and something is left for you: `kill` could not confirm the cancel or could not write the latch, or `flatten` left a position or a reconciliation difference. Read the output. |
 | 2 | Refused or failed. The message on stderr says what was and was not done. A usage error is also 2. |
 | 3 | It crashed. The traceback is on stderr, and how far it got is not known: check `status` and `positions`. |
 | other | Ctrl-C ends the command with Python's own status for an interrupt, not 0 to 3. See "Ctrl-C during flatten". |
@@ -140,8 +140,10 @@ To reset:
 3. Start the runner again. A runner that was running when the switch was engaged has
    exited; a reset never revives it.
 
-Known gap (issue #32): if the latch file cannot be written, `kill` can print "engaged"
-and exit 0 with no latch on disk. After `kill`, confirm with `status`.
+If the latch file cannot be written (disk full, permissions), nothing stops the next
+run. `kill` then exits 1 and says "THE LATCH FILE WAS NOT WRITTEN"; a kill made by the
+runner says "THE LATCH IS NOT ON DISK" in its alert, and `status` shows the switch as
+not engaged. Do not start the runner: make `state/paper/` writable and run `kill` again.
 
 ## The account and the ledger differ
 
