@@ -81,20 +81,24 @@ scheduled GitHub Actions holding trading keys on a public repository.
 Checked against Alpaca's docs in PR 16, before the adapter relies on them. The paper
 simulator items can only be settled by the end-to-end run (PR 22).
 
-| Claim | Used by |
-|---|---|
-| Market-on-open (`opg`) orders are accepted until about 09:28 New York and rejected from then until the evening | `opg_cutoff`, D2 schedule |
-| The paper simulator honors `opg` orders and fills them near the open | Exit path; fallback is a market day order after the open |
-| The paper simulator fills against quotes with no market impact or queue | How far paper answers the cost question |
-| One paper key pair serves both the data and trading APIs | Flag 2, key handling |
-| Paper key ids start with `PK` | Live-impossible layer |
-| `client_order_id` is at most 48 characters (possibly longer) and a duplicate is rejected | Idempotent submission |
-| Account configuration offers `no_shorting`, `max_margin_multiplier`, `suspend_trade` | Broker-side backstops, kill switch second layer |
-| Trading API rate limit is 200 requests per minute | `max_requests_per_minute` |
-| An open sell order reserves the shares it covers | Protective-stop conflict above |
-| Account activities expose per-execution fills | Ledger upgrade path |
-| The full set of order status strings | Status mapping |
-| An `opg` order that does not fill in the auction ends as `canceled` (not `expired`) | Fake venue (`OPG_GRACE_SECONDS`); the order manager must not depend on which |
+| Claim | Used by | Checked in plan 16 |
+|---|---|---|
+| Market-on-open (`opg`) orders are accepted until about 09:28 New York and rejected from then until the evening | `opg_cutoff`, D2 schedule | Confirmed: rejected after 9:28am and before 7:00pm ET (alpaca-py 0.45 `TimeInForce` docstring) |
+| The paper simulator honors `opg` orders and fills them near the open | Exit path; fallback is a market day order after the open | Not found in the docs. One forum remark says paper orders never reach an auction. Settled by the real run (plan 22) |
+| The paper simulator fills against quotes with no market impact or queue | How far paper answers the cost question | Alpaca staff on the forum: fills use the current bid and ask, ignore liquidity, and are sometimes partial at random. Not in the reference docs |
+| One paper key pair serves both the data and trading APIs | Flag 2, key handling | Not checked here; the data loader already uses the paper pair |
+| Paper key ids start with `PK` | Live-impossible layer | A convention only: Alpaca's security guide calls the prefixes "visual hints". Kept as one layer (refusing fails safe); the paper host check is the real guard |
+| `client_order_id` is at most 48 characters (possibly longer) and a duplicate is rejected | Idempotent submission | The limit is 128 (order reference). Ids are unique per order, but what a repeat returns is not documented. The adapter looks up after any rejection and does not depend on it |
+| Account configuration offers `no_shorting`, `max_margin_multiplier`, `suspend_trade` | Broker-side backstops, kill switch second layer | Confirmed (alpaca-py `AccountConfiguration`); `max_margin_multiplier` is text |
+| Trading API rate limit is 200 requests per minute | `max_requests_per_minute` | 200 per minute per account, paper included (Alpaca support page and staff on the forum); not found in the reference docs |
+| An open sell order reserves the shares it covers | Protective-stop conflict above | Not checked; nothing in this slice depends on it |
+| Account activities expose per-execution fills | Ledger upgrade path | Not checked; not used in this slice |
+| The full set of order status strings | Status mapping | 18 in alpaca-py 0.45 `OrderStatus`; every one is in the adapter's table, and a test fails if the SDK adds one |
+| An `opg` order that does not fill in the auction ends as `canceled` (not `expired`) | Fake venue (`OPG_GRACE_SECONDS`); the order manager must not depend on which | Confirmed: "any unfilled orders after the open will be cancelled" (`TimeInForce` docstring). The order manager treats both alike |
+| Characters allowed in a `client_order_id` | Order ids | Not found. Ids are built from letters, digits and `-` only (`id_symbol`); Alpaca's own generated ids contain `-` |
+| Paper fills carry no commission or fees | Ledger books 0 | Not found. Settled by the real run (plan 22): a fee shows up as a cash difference in reconciliation |
+| The order list returns every open order | `refresh` | No: it defaults to 50 and allows at most 500. The adapter asks for 500 and treats a full list as an error |
+| alpaca-py leaves retries and timeouts to the caller | Adapter | No: it retries 429 and 504 three times by itself and sets no timeout. The adapter switches the retries off and sets a timeout |
 
 ---
 
@@ -988,4 +992,14 @@ this doc.
 8. Place a manual order in the Alpaca dashboard; confirm reconciliation stops trading;
    `accept_broker_state`.
 9. `flatten`: confirms the market-on-open exit path and records whether paper honors OPG.
+10. Answer on purpose what the docs did not (verify list): does paper accept and fill an
+    `opg` order at the open; does a paper fill carry any fee (compare ledger cash with the
+    account after the first sell); what does a repeated `client_order_id` return; does a
+    symbol with a `.` trade under its mapped order id; does Alpaca answer 403 for an
+    entry that exceeds buying power (the adapter treats 403 on an order as a rejection);
+    does turning `no_shorting` on change the account's `shorting_enabled` field (if it
+    does, `verify_account` can also refuse when the two disagree).
+11. Before step 1, set `no_shorting` on and `max_margin_multiplier` to 1 in the paper
+    account's settings by hand. The adapter checks them (`verify_account`) and never
+    changes account settings.
 10. Compare paper fills with the official opens; note the slippage against 5 bps.

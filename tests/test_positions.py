@@ -13,6 +13,7 @@ import pytest
 
 from harness.broker.venue import (
     VenueAccount,
+    VenueDataError,
     VenueOrder,
     VenueOrderState,
     VenuePosition,
@@ -635,6 +636,19 @@ def test_bad_venue_data_stops_with_a_plain_reason_not_a_traceback() -> None:
     (reason,) = report.reasons
     assert reason.startswith("venue data failed validation, stopping: VenuePosition")
     assert "avg_entry_price" in reason
+
+
+def test_venue_data_the_adapter_could_not_trust_stops_reconciliation() -> None:
+    class Truncated(FakeVenue):
+        def open_orders(self) -> list[VenueOrderState]:
+            raise VenueDataError("500 open orders, the most one list can hold")
+
+    venue = Truncated(clock=at(DAYS[1], 9, 45))
+    report = reconcile_venue(Ledger(10_000.0).account(), [], venue, 0.0, 1.0)
+    assert report.severity == "stop"
+    assert report.reasons == (
+        "venue data failed validation, stopping: 500 open orders, the most one list can hold",
+    )
 
 
 def test_unreachable_venue_is_not_reported_as_a_reconciliation_result() -> None:

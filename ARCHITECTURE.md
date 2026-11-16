@@ -57,10 +57,9 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/indicators.py` | Indicator calculations (SMA, RSI, ...) from past bars only; each addition is reviewed with a look-ahead test | Rules |
 | `strategies/rules.py` | Generic strategy that runs a rule template (indicators plus conditions, as data) | Rules |
 | `harness/risk.py` | Hard limits; can shrink or reject; never blocks risk-reducing orders | 2 |
-| `harness/orders.py` | Limit pricing, retries, rate limits, optional manual approval | 2 |
 | `harness/positions.py` | Ledger: cash, positions and realized P&L, built only from journaled fills and operator adjustments. Reconciliation against the broker, which compares and never corrects | 2 |
 | `harness/journal.py` | Append-only, fsynced event log; the source of truth for paper trading state. The writer holds an exclusive file lock | 2 |
-| `harness/broker/alpaca.py` | Paper/live adapter; the only code holding trading keys | 2 |
+| `harness/broker/alpaca.py` | `AlpacaBroker`: the venue for the Alpaca paper account, and the only trading network code. No mode or URL argument; sorts every failure into rejected, unknown, or untrustworthy | 2 |
 | `harness/pricing.py` | Implied volatility and Greeks | Options |
 
 Each component starts as the simplest rule that works and is upgraded only when

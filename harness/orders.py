@@ -52,6 +52,7 @@ from harness.broker.venue import (
     KillSwitchEngaged,
     TimeInForce,
     Venue,
+    VenueDataError,
     VenueOrder,
     VenueOrderState,
     VenueOrderType,
@@ -157,11 +158,25 @@ def profile_tag(profile_id: str) -> str:
     return tag
 
 
+def id_symbol(symbol: str) -> str:
+    """`symbol` as it appears in an order id: letters and digits only, so the id does
+    not depend on which characters a venue allows in a client order id.
+
+    A plain ticker is itself. Anything else (`BRK.B`) drops the other characters and
+    adds `x` and four hex digits of the symbol's hash, so `BRK.B` and `BRK-B` stay
+    different. Tickers are upper case, so the `x` cannot collide with a real one.
+    """
+    if symbol.isalnum():
+        return symbol
+    letters = "".join(c for c in symbol if c.isalnum())
+    return f"{letters}x{hashlib.sha256(symbol.encode()).hexdigest()[:4]}"
+
+
 def order_id_for(profile_id: str, order: Order) -> str:
     """The id of `order` under `profile_id`: a function of the decision only."""
     tag = profile_tag(profile_id)
     kind = "e" if order.action == "enter" else "x"
-    return f"{tag}-{order.created_on:%Y%m%d}-{order.symbol}-{kind}"
+    return f"{tag}-{order.created_on:%Y%m%d}-{id_symbol(order.symbol)}-{kind}"
 
 
 @dataclass
@@ -424,6 +439,8 @@ class OrderManager(Broker):
             if lookup_first:
                 try:
                     found = self._venue.get_order(client_id)
+                except VenueDataError as exc:
+                    self._violation(f"the venue's data cannot be trusted: {exc}")
                 except Exception:
                     continue  # cannot look: do not resend blind
                 if found is not None:
@@ -449,6 +466,8 @@ class OrderManager(Broker):
                 )
                 self._close(tracked, "rejected", "broker_rejected")
                 return
+            except VenueDataError as exc:
+                self._violation(f"the venue's data cannot be trusted: {exc}")
             except Exception:
                 tracked.phase = "unknown"
                 attempt.maybe_sent = True
@@ -476,6 +495,8 @@ class OrderManager(Broker):
         adopted) or could not be asked (the order stays unknown)."""
         try:
             found = self._venue.get_order(attempt.venue_order.client_order_id)
+        except VenueDataError as exc:
+            self._violation(f"the venue's data cannot be trusted: {exc}")
         except Exception:
             return True
         if found is None:
@@ -503,6 +524,8 @@ class OrderManager(Broker):
             return
         try:
             listed = {s.client_order_id: s for s in self._venue.open_orders()}
+        except VenueDataError as exc:
+            self._violation(f"the venue's data cannot be trusted: {exc}")
         except Exception:
             listed = {}  # fall back to asking about each order
         for tracked, attempt in watched:
@@ -510,6 +533,8 @@ class OrderManager(Broker):
             if state is None:
                 try:
                     state = self._venue.get_order(attempt.venue_order.client_order_id)
+                except VenueDataError as exc:
+                    self._violation(f"the venue's data cannot be trusted: {exc}")
                 except Exception:
                     continue
             if state is not None:
@@ -684,6 +709,8 @@ class OrderManager(Broker):
         client_id = attempt.venue_order.client_order_id
         try:
             state = self._venue.get_order(client_id)
+        except VenueDataError as exc:
+            self._violation(f"the venue's data cannot be trusted: {exc}")
         except Exception:
             return False
         if state is None:
@@ -701,6 +728,8 @@ class OrderManager(Broker):
             try:
                 self._venue.cancel(client_id)
                 state = self._venue.get_order(client_id) or state
+            except VenueDataError as exc:
+                self._violation(f"the venue's data cannot be trusted: {exc}")
             except Exception:
                 pass  # asked again on the next round
         self._observe(tracked, attempt, state)
@@ -833,6 +862,8 @@ class OrderManager(Broker):
                 self._sleep(self._cfg.poll_seconds * tried)
             try:
                 state = self._venue.get_order(client_id)
+            except VenueDataError as exc:
+                self._violation(f"the venue's data cannot be trusted: {exc}")
             except Exception:
                 continue
             if state is not None:
@@ -1238,6 +1269,8 @@ class OrderManager(Broker):
                 self._sleep(self._cfg.poll_seconds)
             try:
                 offset = self._venue.now() - self._now()
+            except VenueDataError as exc:
+                self._violation(f"the venue's data cannot be trusted: {exc}")
             except Exception:
                 continue
             if abs(offset.total_seconds()) > self._cfg.max_clock_skew_seconds:

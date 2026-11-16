@@ -325,6 +325,7 @@ def test_repo_execution_settings_load(config_copy: Path) -> None:
     assert (cfg.max_requests_per_minute, cfg.cash_tolerance) == (150, 1.0)
     assert cfg.max_clock_skew_seconds == 30.0
     assert cfg.cancel_confirm_seconds == 30.0
+    assert cfg.request_timeout_seconds == 10.0
     assert cfg.limits == OrderLimits(max_order_notional=5000.0, max_orders_per_session=25)
     assert ExecutionConfig.model_validate(cfg.model_dump(mode="json")) == cfg
 
@@ -355,6 +356,14 @@ def test_missing_execution_file_is_reported(config_copy: Path) -> None:
         ("max_submit_attempts: 3", "max_submit_attempts: 0", "max_submit_attempts"),
         ("poll_seconds: 5.0", "", "poll_seconds"),  # missing, not defaulted
         ("cancel_confirm_seconds: 30.0", "cancel_confirm_seconds: 0", "cancel_confirm_seconds"),
+        ("request_timeout_seconds: 10.0", "request_timeout_seconds: 0", "request_timeout_seconds"),
+        # 10s * 3 attempts no longer fits between a 09:25 cutoff and a 09:25:20 exit deadline.
+        ('exit_deadline: "09:40"', 'exit_deadline: "09:25:20"', "must be less than the time from"),
+        (
+            "request_timeout_seconds: 10.0",
+            "request_timeout_seconds: 600",
+            "request_timeout_seconds",
+        ),
         ("cash_tolerance: 1.00", "cash_tolerance: -1", "cash_tolerance"),
     ],
 )
