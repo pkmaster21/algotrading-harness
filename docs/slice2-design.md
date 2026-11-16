@@ -1206,13 +1206,18 @@ flatten and the slippage comparison.
    one order at Alpaca, not two. (A marketable limit fills at once on paper, so the
    window between sending and recording cannot be hit by hand; the fake-venue test
    covers it.)
-10. Compare paper fills with the official opens (`trades.csv`, `summary.json`); note the
-    slippage against 5 bps.
-11. Last: place a manual market order in the Alpaca dashboard during market hours, in
-    a `plumbing-10` symbol (SPY is simplest: `accept` refuses a symbol outside the
-    universe, and an order that has not filled is only canceled by the kill); confirm
-    the next run kills on the reconciliation difference; `harness.cli accept`, then `reset-kill`. From here
-    `trades.csv` and `summary.json` stop updating.
+10. On the next session: one clean run (buy and hold holds, so no orders). It journals
+    the re-entry day's official open, so the report now carries the re-entry fill too.
+11. Compare paper fills with the official opens (`trades.csv`, `summary.json`): three
+    fills, the day 1 entry, the flatten sell and the re-entry. Note the slippage against
+    5 bps.
+12. Last: after that morning's run, place a manual market order in the Alpaca dashboard
+    during market hours, in a `plumbing-10` symbol (SPY is simplest: `accept` refuses a
+    symbol outside the universe, and an order that has not filled is only canceled by
+    the kill). Confirm the next session's run kills on the reconciliation difference (a
+    rerun the same day reports `already_done` before it reconciles, so it shows
+    nothing); then `harness.cli accept` and `reset-kill`. From here `trades.csv` and
+    `summary.json` stop updating.
 
 Not answered by this run, because the harness never sends such an order: what a
 repeated `client_order_id` returns, whether a symbol with a `.` trades under its mapped
