@@ -151,6 +151,12 @@ class VenueUnavailable(Exception):
     may or may not exist."""
 
 
+class VenueDataError(Exception):
+    """The venue answered, but with something that cannot be trusted or understood: an
+    order status the harness does not know, a fractional quantity, a list that may be
+    cut short. Never treated as "nothing happened": it stops trading."""
+
+
 class KillSwitchEngaged(Exception):
     """The kill latch is set (or unreadable). No order was sent."""
 

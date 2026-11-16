@@ -10,7 +10,13 @@ from typing import Literal
 import pytest
 
 from harness.alerts import Alert
-from harness.broker.venue import KillSwitchEngaged, VenueOrderState, VenueUnavailable
+from harness.broker.alpaca import VenueSetupError
+from harness.broker.venue import (
+    KillSwitchEngaged,
+    VenueDataError,
+    VenueOrderState,
+    VenueUnavailable,
+)
 from harness.config import ExecutionConfig, RiskConfig
 from harness.inbox import Command, Inbox
 from harness.journal import Journal, JournalKind, read_journal
@@ -22,6 +28,7 @@ from harness.orders import (
     OrderManagerError,
     OrderPhase,
     SessionIncomplete,
+    id_symbol,
     order_id_for,
 )
 from harness.positions import Ledger, reconcile_venue
@@ -43,6 +50,7 @@ CFG = ExecutionConfig.model_validate(
         "poll_seconds": 5.0,
         "max_submit_attempts": 3,
         "cancel_confirm_seconds": 30.0,
+        "request_timeout_seconds": 10.0,
         "max_requests_per_minute": 150,
         "cash_tolerance": 1.0,
         "max_clock_skew_seconds": 30.0,
@@ -241,6 +249,23 @@ def test_order_id_is_a_function_of_the_decision() -> None:
     for bad in ("short", "name-0a1b-2c3", "name-0a1b2c3!"):
         with pytest.raises(OrderManagerError, match="8 letters or digits"):
             order_id_for(bad, order("AAPL", "sell", 10))
+
+
+def test_order_id_has_only_letters_and_digits_in_its_symbol_part() -> None:
+    # Which characters a venue allows in a client order id is not something to rely on.
+    assert id_symbol("AAPL") == "AAPL" and id_symbol("A1") == "A1"
+    dotted, dashed = id_symbol("BRK.B"), id_symbol("BRK-B")
+    assert dotted != dashed  # different symbols stay different
+    for mapped in (dotted, dashed, id_symbol("A.B.C-D")):
+        assert mapped.isalnum()
+    assert dotted.startswith("BRKBx") and len(dotted) == len("BRKBx") + 4
+    assert id_symbol("BRK.B") == dotted  # the same every time
+    assert id_symbol("BRKB") == "BRKB" != dotted  # and not the plain ticker
+    order_id = order_id_for(PROFILE, order("BRK.B", "buy", 1))
+    assert order_id == f"0a1b2c3d-20240102-{dotted}-e"
+    assert all(part.isalnum() for part in order_id.split("-"))
+    longest = order_id_for(PROFILE, order("ABCDEFGH.IJKLMNO", "buy", 1)) + "-a99"
+    assert len(longest) <= 48
 
 
 def test_submit_journals_and_sends_nothing(tmp_path: Path) -> None:
@@ -966,6 +991,77 @@ def test_filled_quantity_that_goes_down_kills(tmp_path: Path) -> None:
     with pytest.raises(SessionIncomplete, match="went from 4 down to 1"):
         rig.om.refresh()
     assert rig.kill.engaged() and rig.om.account().positions["NVDA"].quantity == 4
+
+
+@pytest.mark.parametrize("call", ["get_order", "open_orders", "place", "now"])
+def test_venue_data_that_cannot_be_trusted_kills(tmp_path: Path, call: str) -> None:
+    # An order status the adapter does not know, a fractional quantity, a list that may
+    # be cut short: not "no answer", which would be retried quietly until the deadline.
+    class Garbled(FakeVenue):
+        broken = False
+
+        def _check(self, name: str) -> None:
+            if self.broken and name == call:
+                raise VenueDataError(
+                    f"order status 'frozen' is not one the harness handles ({name})"
+                )
+
+        def get_order(self, client_order_id: str) -> VenueOrderState | None:
+            self._check("get_order")
+            return super().get_order(client_order_id)
+
+        def open_orders(self) -> list[VenueOrderState]:
+            self._check("open_orders")
+            return super().open_orders()
+
+        def place(self, order):  # type: ignore[no-untyped-def]
+            self._check("place")
+            return super().place(order)
+
+        def now(self) -> dt.datetime:
+            self._check("now")
+            return super().now()
+
+    rig = Rig(tmp_path, venue_class=Garbled)
+    rig.om.submit([order("AAPL", "sell", 10), order("TSLA", "sell", 5)])
+    rig.send_exit(X_AAPL)
+    rig.venue.broken = True  # type: ignore[attr-defined]
+    with pytest.raises(SessionIncomplete, match="cannot be trusted"):
+        if call == "place":
+            rig.send_exit(X_TSLA)
+        elif call == "now":
+            rig.om.on_session_open(D1, {})
+        elif call == "get_order":
+            rig.om.cancel_all("session_deadline")
+        else:
+            rig.om.refresh()
+    assert rig.kill.engaged()
+    assert "frozen" in rig.alerts.alerts[-1].message
+
+
+@pytest.mark.parametrize("call", ["place", "get_order"])
+def test_setup_failure_during_a_send_kills_instead_of_looking_like_no_answer(
+    tmp_path: Path, call: str
+) -> None:
+    # The adapter refuses a request that is not to the paper host, or finds its keys
+    # refused, in the middle of sending. That must not be read as "outcome unknown".
+    class Misconfigured(FakeVenue):
+        def place(self, order):  # type: ignore[no-untyped-def]
+            self.place_attempts.append(order)
+            if call == "place":
+                raise VenueSetupError("refusing a request that is not to the Alpaca paper host")
+            raise VenueUnavailable("timeout")
+
+        def get_order(self, client_order_id: str) -> VenueOrderState | None:
+            raise VenueSetupError("Alpaca refused the keys or the account (401)")
+
+    rig = Rig(tmp_path, venue_class=Misconfigured)
+    rig.om.submit([order("AAPL", "sell", 10)])
+    with pytest.raises(SessionIncomplete, match="cannot be trusted"):
+        rig.send_exit(X_AAPL)
+    assert rig.kill.engaged()
+    assert rig.phase(X_AAPL) != "rejected" and "order_closed" not in rig.kinds()
+    assert len(rig.venue.place_attempts) == 1  # no retry loop against a broken setup
 
 
 def test_venue_forgetting_an_order_it_reported_kills(tmp_path: Path) -> None:

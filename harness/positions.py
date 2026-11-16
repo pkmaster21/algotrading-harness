@@ -23,7 +23,13 @@ from typing import Literal, Self
 
 from pydantic import Field, ValidationError, model_validator
 
-from harness.broker.venue import Venue, VenueAccount, VenueOrderState, VenuePosition
+from harness.broker.venue import (
+    Venue,
+    VenueAccount,
+    VenueDataError,
+    VenueOrderState,
+    VenuePosition,
+)
 from harness.journal import Journal
 from harness.models import AccountState, Fill, FrozenModel, Position, Stock
 
@@ -482,10 +488,14 @@ def reconcile_venue(
         account = venue.account()
         positions = venue.positions()
         open_orders = venue.open_orders()
-    except ValidationError as exc:
-        problems = "; ".join(
-            f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
-        )
+    except (ValidationError, VenueDataError) as exc:
+        if isinstance(exc, ValidationError):
+            detail = "; ".join(
+                f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
+            )
+            problems = f"{exc.title}: {detail}"
+        else:
+            problems = str(exc)
         return ReconcileReport(
             at=at,
             position_diffs=(),
@@ -493,7 +503,7 @@ def reconcile_venue(
             unexpected_orders=(),
             missing_orders=(),
             severity="stop",
-            reasons=(f"venue data failed validation, stopping: {exc.title}: {problems}",),
+            reasons=(f"venue data failed validation, stopping: {problems}",),
         )
     return reconcile(
         ledger, expected_open, account, positions, open_orders, cash_offset, cash_tolerance, at

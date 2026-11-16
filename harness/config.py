@@ -172,6 +172,10 @@ class OrderLimits(FrozenModel):
     max_orders_per_session: int = Field(ge=1)  # venue orders, retries included
 
 
+def _seconds(time_of_day: dt.time) -> float:
+    return time_of_day.hour * 3600 + time_of_day.minute * 60 + time_of_day.second
+
+
 class ExecutionConfig(FrozenModel):
     """How approved orders reach the venue. Times are New York wall-clock times."""
 
@@ -184,6 +188,9 @@ class ExecutionConfig(FrozenModel):
     session_deadline: dt.time  # anything still working is canceled
     poll_seconds: float = Field(gt=0, le=60)
     max_submit_attempts: int = Field(ge=1, le=10)
+    # How long one request to the venue may take. A request that takes longer counts as
+    # "outcome unknown", like any other failure to get an answer.
+    request_timeout_seconds: float = Field(gt=0, le=60)
     # How long a cancel may take to be confirmed by the venue before trading stops.
     cancel_confirm_seconds: float = Field(gt=0, le=300)
     max_requests_per_minute: int = Field(ge=1, le=200)  # Alpaca allows 200
@@ -212,6 +219,16 @@ class ExecutionConfig(FrozenModel):
         # own auction cutoff is earlier still; the adapter checks against that.
         if not self.opg_cutoff < MARKET_OPEN:
             raise ValueError("opg_cutoff must be before the 09:30 open")
+        # One order can take every submit attempt, each waiting the whole timeout. That
+        # must fit between the auction cutoff and the exit deadline, or a run of
+        # timeouts could carry an exit past the point where it is sent as a market order.
+        worst = self.request_timeout_seconds * self.max_submit_attempts
+        window = _seconds(self.exit_deadline) - _seconds(self.opg_cutoff)
+        if not worst < window:
+            raise ValueError(
+                f"request_timeout_seconds * max_submit_attempts ({worst:g}s) must be less "
+                f"than the time from opg_cutoff to exit_deadline ({window:g}s)"
+            )
         return self
 
 
