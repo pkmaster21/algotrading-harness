@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -11,10 +12,12 @@ import pytest
 from harness.alerts import Alert
 from harness.broker.venue import KillSwitchEngaged, VenueOrderState, VenueUnavailable
 from harness.config import ExecutionConfig, RiskConfig
+from harness.inbox import Command, Inbox
 from harness.journal import Journal, JournalKind, read_journal
 from harness.killswitch import KillSwitch
 from harness.models import Fill, Leg, OptionContract, Order, Side, Stock
 from harness.orders import (
+    ApprovalMode,
     OrderManager,
     OrderManagerError,
     OrderPhase,
@@ -88,6 +91,17 @@ class Tampering(FakeVenue):
         return [s for s in states if s is not None and not s.is_terminal]
 
 
+class ClockedInbox(Inbox):
+    """An inbox whose files are stamped with the fake clock instead of the real one: a
+    command's file is dated when the command says it was decided. A test that needs
+    the two to differ sets the file's time itself."""
+
+    def put(self, command: Command) -> Path:
+        path = super().put(command)
+        os.utime(path, (command.at.timestamp(), command.at.timestamp()))
+        return path
+
+
 class Recorder:
     def __init__(self) -> None:
         self.alerts: list[Alert] = []
@@ -123,11 +137,14 @@ class Rig:
         reject_duplicate_ids: bool = False,
         risk: RiskManager | None = None,
         max_positions: int = 10,
+        approval: ApprovalMode = "off",
     ) -> None:
         self.holdings = {"AAPL": 10, "TSLA": 5} if holdings is None else holdings
         self.cfg = cfg
         self.risk = risk or risk_manager()
         self.max_positions = max_positions
+        self.approval: ApprovalMode = approval
+        self.inbox = ClockedInbox(tmp_path / "inbox")
         spent = sum(q * CLOSES[s] for s, q in self.holdings.items())
         self.venue = venue_class(
             clock=at(D1, 8, 0),
@@ -164,7 +181,8 @@ class Rig:
                 self.ledger.apply_fill(seed, quantity)
         self.om = OrderManager(
             self.venue, self.ledger, self.journal, self.kill, self.alerts, self.cfg, PROFILE,
-            self.risk, self.max_positions, sleep=self.venue.advance, now=lambda: self.venue.clock,
+            self.risk, self.max_positions, self.approval, self.inbox,
+            sleep=self.venue.advance, now=lambda: self.venue.clock,
         )  # fmt: skip
         if recover:
             self.om.recover()
@@ -1128,7 +1146,16 @@ def test_journal_from_another_profile_or_out_of_step_with_the_ledger_is_refused(
     rig.om.submit([order("AAPL", "sell", 10)])
     assert rig.journal is not None
     other = OrderManager(
-        rig.venue, rig.ledger, rig.journal, rig.kill, None, CFG, "other-99999999", rig.risk, 10
+        rig.venue,
+        rig.ledger,
+        rig.journal,
+        rig.kill,
+        None,
+        CFG,
+        "other-99999999",
+        rig.risk,
+        10,
+        "off",
     )
     with pytest.raises(OrderManagerError, match="does not replay"):
         other.recover()

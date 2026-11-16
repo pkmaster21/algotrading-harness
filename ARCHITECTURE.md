@@ -37,7 +37,8 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models | 1 |
 | `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff | 1 |
 | `harness/ratelimit.py` | Request rate limiter shared by the data loader and the venue adapter | 2 |
-| `harness/orders.py` | Order manager core: staging, deterministic order ids, duplicate-free submission (write-ahead journal, lookup before resend), venue states into ledger fills, cancel with confirmation, recovery after a restart. Implements `Broker` for paper trading: `on_session_open` runs the open (auction exits, entries released against the actual account after the open, deadlines) | 2 |
+| `harness/orders.py` | Order manager core: staging, deterministic order ids, duplicate-free submission (write-ahead journal, lookup before resend), venue states into ledger fills, cancel with confirmation, recovery after a restart. Implements `Broker` for paper trading: `on_session_open` runs the open (auction exits, entries released against the actual account after the open, deadlines), with optional manual approval of entries | 2 |
+| `harness/inbox.py` | How another process hands the runner a control command: one file per command, written whole, removed once handled. Approve and reject so far | 2 |
 | `harness/killswitch.py` | Kill latch file (fails closed, any process can set it) and `kill`, which sets it, then cancels open orders and confirms. Never sells | 2 |
 | `harness/alerts.py` | `Alert`, the `Alerter` protocol, and the log and `alerts.jsonl` sinks. A sink never raises | 2 |
 | `harness/keys.py` | Read API keys from `.env` into a redacted local object; never touches the environment | 2 |
@@ -335,6 +336,11 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   That is the right failure for entries. For exits, sending them late as market orders
   would reduce risk sooner. Kept as built for paper, where a late start is something to
   investigate; decide before live.
+- Who may write to the inbox. Anything that can write a file there can approve entries:
+  `operator` is a free string and nothing checks who wrote the file. Fine while the
+  operator is the only writer. The slice 3 chat agent must not get write access to the
+  inbox, or a human approval gate becomes an agent approval. Settle it in the slice 3
+  agent-permissions design.
 - Venue fees in live trading. The order manager books every venue fill with a commission
   of 0, which is right for paper. Live, Alpaca passes on small regulatory fees on sells
   (about 14 cents on a $5,000 sale). Reconciliation compares the total cash difference,

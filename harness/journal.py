@@ -48,6 +48,8 @@ JournalKind = Literal[
     "order_unknown",
     "entries_blocked",
     "order_closed",
+    "approval",
+    "command_refused",
 ]
 
 
