@@ -1140,10 +1140,13 @@ class OrderManager(Broker):
         called, never for more than the ledger holds. Only the latch check differs, and
         only for sells (`KillSwitch.flattening`).
 
-        A kill from anywhere else stops it: the latch is read on every pass, and once
-        it is not the latch this flatten started under, the sells are canceled and
-        SessionIncomplete is raised. A kill reports what it canceled, and nothing is
-        sent after that report.
+        A kill from anywhere else stops it, whether or not that kill confirms its
+        cancel: every kill changes the latch file before it cancels. The file is read
+        on every pass and again before every send (`KillSwitch.flattening`), and once
+        it is not the latch this flatten started under, nothing more is sent, the sells
+        are canceled and SessionIncomplete is raised. What remains is a request already
+        on its way to the venue when the kill began: it can still arrive, and this
+        flatten cancels it when it stops.
 
         The sells count against `max_orders_per_session` like any other order. If the
         session's orders have used the cap up, the next send stops everything
@@ -1245,7 +1248,7 @@ class OrderManager(Broker):
         exit_deadline = at(self._cfg.exit_deadline)
         sends: dict[str, int] = {}
         stopped = False
-        with self._kill.flattening():
+        with self._kill.flattening(latch):
             while True:
                 if self._kill.on_disk() != latch:
                     stopped = True
@@ -1255,8 +1258,16 @@ class OrderManager(Broker):
                     break
                 if now >= open_at:
                     self.refresh()
-                for tracked in sells:
-                    self._work_exit(tracked, session, sends, now < opg_cutoff, now >= exit_deadline)
+                try:
+                    for tracked in sells:
+                        self._work_exit(
+                            tracked, session, sends, now < opg_cutoff, now >= exit_deadline
+                        )
+                except KillSwitchEngaged:
+                    # The latch changed between the look above and a send: the pass for
+                    # sells ended with it, and the sell was not sent.
+                    stopped = True
+                    break
                 if all(t.phase in TERMINAL_PHASES for t in sells):
                     break
                 self._sleep(max(min(self._cfg.poll_seconds, (until - now).total_seconds()), 0.001))

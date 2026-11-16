@@ -13,7 +13,9 @@ The kill switch never sells. It cancels orders and stops; flattening is a separa
 confirmed operator command (D6). That command is the one thing allowed past a set latch:
 inside `KillSwitch.flattening()` a sell passes `check`, and nothing else does. The pass
 lives in memory on the one `KillSwitch` object the command built, so no other process
-and no other object has it.
+and no other object has it. It holds only while the latch file is the one the command
+started under, and every `kill` changes the file (`note_kill`) before it cancels
+anything: a kill from anywhere ends the pass, whether or not its cancel is confirmed.
 """
 
 from __future__ import annotations
@@ -44,6 +46,9 @@ class KillState(FrozenModel):
     reason: str = ""
     source: str = ""  # "operator:cli", "auto:reconcile", ...
     cancel_confirmed: bool = False
+    # How many times `kill` has run against this latch. It exists so that the file
+    # changes on every kill, which is how a running flatten learns of one.
+    kills: int = Field(default=0, ge=0)
     # False only on what `kill` returns when no latch is on disk afterwards: this
     # process is stopped, but another process, or the next run, is not. Not part of the
     # latch file.
@@ -62,7 +67,8 @@ class KillSwitch:
         self.path = path
         self._now = now
         self._latched: KillState | None = None  # set when this process engaged the switch
-        self._sells_pass = False  # True only inside `flattening()`
+        # Set only inside `flattening()`: the latch file the sell pass is valid under.
+        self._sells_pass: KillState | None = None
 
     def engaged(self) -> bool:
         """True if the latch exists or cannot be read. Fails closed."""
@@ -80,23 +86,28 @@ class KillSwitch:
         """Raise KillSwitchEngaged if the latch is set. Call before anything that sends.
 
         `selling` says the order about to be sent is a sell. It makes no difference
-        except inside `flattening()`, where a sell passes a set latch."""
-        if selling and self._sells_pass:
+        except inside `flattening()`, where a sell passes a set latch for as long as
+        the latch file is still the one the pass was given under."""
+        if selling and self._sells_pass is not None and self.on_disk() == self._sells_pass:
             return
-        if self.engaged():
+        if self.engaged() or self._sells_pass is not None:
             raise KillSwitchEngaged(f"kill latch {self.path} is set")
 
     @contextlib.contextmanager
-    def flattening(self) -> Iterator[None]:
-        """Let sells through this object's `check` while the block runs, latch or no
-        latch. For the operator's `flatten` command only: the order manager still
-        refuses a sell larger than the position, so what passes can only reduce risk.
-        Buys are refused as ever."""
-        self._sells_pass = True
+    def flattening(self, under: KillState) -> Iterator[None]:
+        """Let sells through this object's `check` while the block runs and the latch
+        file still reads `under` (what `orders_sent` returned). For the operator's
+        `flatten` command only: the order manager still refuses a sell larger than the
+        position, so what passes can only reduce risk. Buys are refused as ever.
+
+        The file is read again on every `check`. Once it is anything but `under` (a
+        kill ran, the switch was reset, the file cannot be read), sells are refused
+        like everything else, for the rest of the block."""
+        self._sells_pass = under
         try:
             yield
         finally:
-            self._sells_pass = False
+            self._sells_pass = None
 
     def state(self) -> KillState:
         """Who engaged the latch, when and why. Always agrees with `engaged`: a latch
@@ -157,8 +168,9 @@ class KillSwitch:
     def orders_sent(self) -> KillState:
         """Record in the latch that orders may be open at the venue again: the
         operator's flatten is about to send sells past it. A kill run after this
-        cancels them and confirms, which sets the note back. That change is how a
-        running flatten learns it has been stopped (`on_disk`).
+        cancels them and confirms, which sets the note back. That change, and the one
+        every kill makes before it cancels (`note_kill`), is how a running flatten
+        learns it has been stopped (`on_disk`).
 
         Returns what the latch file holds afterwards, from the one read made before the
         write. The caller must look at it: if the note could not be written, or the
@@ -171,6 +183,23 @@ class KillSwitch:
         engaged the switch itself would otherwise never see another process reset it."""
         return KillSwitch(self.path, self._now).state()
 
+    def note_kill(self) -> bool:
+        """Count one more kill in the latch file. `kill` calls this right after it
+        engages and before it asks the venue anything, so the file changes on every
+        kill, confirmed or not, and a flatten running in another process stops sending
+        (its pass ends at the next `check`, its loop at the next pass).
+
+        False only if a readable latch could not be rewritten: a flatten running under
+        it has not been told. A latch that is not readable needs no note, because no
+        flatten can be running under one (it refuses to start, and stops if the file
+        turns unreadable). As in `confirm_cancel`, a reset that lands between the read
+        and the write is undone by the write, which is the safe direction.
+        """
+        state = self.on_disk()
+        if not state.engaged or state.at is None:
+            return True
+        return self._rewrite(state.model_copy(update={"kills": state.kills + 1}))
+
     def _note_cancel(self, value: bool, state: KillState | None = None) -> KillState:
         state = state if state is not None else self.state()
         if not state.engaged or state.at is None:  # not engaged, or an unreadable latch
@@ -178,19 +207,26 @@ class KillSwitch:
         confirmed = state.model_copy(update={"cancel_confirmed": value})
         if self._latched is not None:
             self._latched = self._latched.model_copy(update={"cancel_confirmed": value})
+        if not self._rewrite(confirmed):
+            return state  # the latch itself is still set; only the note is missing
+        return confirmed
+
+    def _rewrite(self, state: KillState) -> bool:
+        """Replace the latch file with `state`, atomically. False if it could not be
+        written; the file is then as it was."""
         try:
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name, suffix=".tmp")
             try:
                 with os.fdopen(fd, "w") as fh:
-                    fh.write(confirmed.model_dump_json() + "\n")
+                    fh.write(state.model_dump_json() + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.replace(tmp, self.path)
             finally:
                 Path(tmp).unlink(missing_ok=True)
         except OSError:
-            return state  # the latch itself is still set; only the note is missing
-        return confirmed
+            return False
+        return True
 
     def reset(self, operator: str, confirm: str, profile_id: str) -> KillState:
         """Remove the latch. `confirm` must equal `profile_id`, the active profile, typed
@@ -253,6 +289,10 @@ def kill(
     `cancel_confirmed` is False. If the cancel cannot be confirmed, the latch stays set
     and the alert says so. Positions are never touched.
 
+    Between the latch and the cancel it counts itself in the latch file (`note_kill`).
+    That is what stops a flatten running in another process, also when the cancel is
+    not confirmed afterwards.
+
     If no latch is on disk afterwards (it could not be written), the returned state
     has `latch_written` False and the alert says so: this process is stopped, but
     nothing stops the next one. A caller that reports to an operator must pass that on.
@@ -265,6 +305,18 @@ def kill(
         state = switch.state()
         if not state.engaged:  # cannot happen after engage, but never report "not engaged"
             state = KillState(engaged=True, at=now(), reason=reason, source=source)
+    try:
+        noted = switch.note_kill()  # before the venue is asked anything
+    except Exception:
+        noted = False
+    if noted:
+        fresh = switch.state()
+        state = fresh if fresh.engaged and fresh.at is not None else state
+    else:
+        problems.append(
+            "this kill could not be noted in the latch file, so a flatten running in "
+            "another terminal may NOT have stopped; end that process"
+        )
 
     confirmed = False
     if venue is None:
