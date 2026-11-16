@@ -20,8 +20,10 @@ How a duplicate order is made impossible:
 - **"Not found" right after a timeout proves nothing.** The venue may have accepted the
   order and not show it yet. So once a send has timed out, a rejection of the resend
   (a venue may reject a repeated client id) is looked up before it is believed, and an
-  attempt that still cannot be found stays `unknown`. It is written off only after a
-  restart, or after `cancel_confirm_seconds` of not being found.
+  attempt that still cannot be found stays `unknown`. It is written off only by a
+  lookup after a restart. One still not found when it is canceled, after
+  `cancel_confirm_seconds` of looking, kills: the session does not complete, and the
+  lookup in `recover()` after `reset-kill` books a late fill as a fill.
 - **One attempt at a time.** A new attempt is created only after the previous one is
   final at the venue, for the quantity still unfilled.
 
@@ -719,7 +721,7 @@ class OrderManager(Broker):
             for tracked in pending:
                 attempt = tracked.last
                 assert attempt is not None  # working, unknown and submitting have one
-                if self._cancel_one(tracked, attempt, waited):
+                if self._cancel_one(tracked, attempt):
                     finish(tracked)  # staged here means it never reached the venue
                 else:
                     still.append(tracked)
@@ -727,6 +729,14 @@ class OrderManager(Broker):
             if not pending:
                 break
             if waited >= self._cfg.cancel_confirm_seconds:
+                unseen = [t.order_id for t in pending if _unseen(t)]
+                if unseen:
+                    # Left unknown, not voided: the lookup in recover() after a reset
+                    # books a late fill as a fill.
+                    self._violation(
+                        f"a send got no answer and the venue still does not show it after "
+                        f"{waited:.0f} seconds: {', '.join(unseen)}. It may be at the venue"
+                    )
                 ids = ", ".join(t.order_id for t in pending)
                 self._violation(
                     f"cancel not confirmed by the venue after {waited:.0f} seconds for: {ids}"
@@ -735,9 +745,9 @@ class OrderManager(Broker):
             waited += self._cfg.poll_seconds
         return canceled
 
-    def _cancel_one(self, tracked: _Tracked, attempt: _Attempt, waited: float) -> bool:
+    def _cancel_one(self, tracked: _Tracked, attempt: _Attempt) -> bool:
         """Request a cancel and read the order back. True once nothing of the order is
-        left at the venue. `waited` is how long this cancel has been polling."""
+        left at the venue."""
         client_id = attempt.venue_order.client_order_id
         try:
             state = self._venue.get_order(client_id)
@@ -748,9 +758,10 @@ class OrderManager(Broker):
         if state is None:
             if attempt.state == "open":
                 self._violation(f"the venue no longer knows {client_id}, which it reported earlier")
-            if attempt.maybe_sent and waited < self._cfg.cancel_confirm_seconds:
+            if attempt.maybe_sent:
                 # A send got no answer, and "not found" may only mean "not visible yet".
-                # Keep looking for the whole confirmation window before writing it off.
+                # Keep looking; at the end of the window _pull kills instead of writing
+                # it off.
                 return False
             # Journaled but never seen: the venue has no such order.
             self._void(tracked, attempt, "not at the venue when canceled")
@@ -1015,9 +1026,6 @@ class OrderManager(Broker):
         def reason(tracked: _Tracked) -> OrderUpdateReason:
             if tracked.side == "sell":
                 return "session_deadline"
-            last = tracked.last
-            if last is not None and last.state == "void" and last.maybe_sent:
-                return "unknown_outcome"  # a send got no answer and the order never showed up
             sent = any(a.state != "void" for a in tracked.attempts)
             return "limit_not_reached" if sent else "session_deadline"
 
@@ -1585,6 +1593,12 @@ class OrderManager(Broker):
             now=self._now,
         )
         raise SessionIncomplete(message)
+
+
+def _unseen(tracked: _Tracked) -> bool:
+    """A send of the last attempt got no answer and the venue has never shown it."""
+    last = tracked.last
+    return last is not None and last.maybe_sent and last.state == "sending"
 
 
 def _check_supported(order: Order) -> None:

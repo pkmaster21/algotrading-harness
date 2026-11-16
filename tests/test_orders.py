@@ -714,8 +714,12 @@ def test_kill_during_the_retry_backoff_stops_the_resend(tmp_path: Path) -> None:
     with pytest.raises(KillSwitchEngaged):
         rig.send_exit(X_AAPL)
     assert rig.places(X_AAPL + "-a1") == 1 and rig.venue.open_orders() == []
-    assert rig.om.cancel_all("kill_switch") == [X_AAPL]  # cleanup still works while killed
-    assert rig.om.poll_updates()[-1].reason == "kill_switch"
+    # The send got no answer and the venue never showed the order, so the cleanup
+    # cannot vouch that it is gone: it is left unknown for the lookup after a reset.
+    with pytest.raises(SessionIncomplete, match="still does not show it"):
+        rig.om.cancel_all("kill_switch")
+    assert rig.phase(X_AAPL) == "unknown" and "attempt_void" not in rig.kinds()
+    assert rig.kill.state().source == "operator:cli"  # the operator's reason stays
 
 
 def test_an_order_is_never_sent_in_its_own_signal_session(tmp_path: Path) -> None:
@@ -905,18 +909,52 @@ def test_cancel_survives_a_venue_that_fails_now_and_then(tmp_path: Path) -> None
     assert rig.venue.open_orders() == []
 
 
-def test_cancel_of_an_unknown_order_that_never_reached_the_venue(tmp_path: Path) -> None:
+def test_cancel_of_an_unknown_order_never_seen_kills_and_leaves_it_unknown(
+    tmp_path: Path,
+) -> None:
     rig = Rig(tmp_path)
     rig.venue.script("AAPL", OrderScript(timeouts_before_accept=99))
     rig.om.submit([order("AAPL", "sell", 10)])
     assert rig.send_exit(X_AAPL) == "unknown"
     rig.om.poll_updates()
     start = rig.venue.clock
-    assert rig.om.cancel_all("session_deadline") == [X_AAPL]
-    # A send went unanswered, so "not found" is only believed after the whole window.
-    assert rig.venue.clock - start == dt.timedelta(seconds=CFG.cancel_confirm_seconds)
-    assert rig.kinds()[-2:] == ["attempt_void", "order_closed"]
-    assert rig.om.poll_updates()[0].status == "canceled"
+    with pytest.raises(SessionIncomplete, match="still does not show it"):
+        rig.om.cancel_all("session_deadline")
+    # A send went unanswered, so "not found" is looked at for the whole window, then
+    # the order is not written off: the session stops instead.
+    assert rig.venue.clock - start >= dt.timedelta(seconds=CFG.cancel_confirm_seconds)
+    assert rig.kill.engaged() and rig.kill.state().source == "auto:orders"
+    assert rig.phase(X_AAPL) == "unknown"
+    assert "attempt_void" not in rig.kinds() and "order_closed" not in rig.kinds()
+    assert rig.om.poll_updates() == []
+    # After a reset, recovery looks it up again: really not there, so it is voided and
+    # the exit is left to send again.
+    rig.kill.reset("david", PROFILE, PROFILE)
+    rig.restart()
+    assert rig.phase(X_AAPL) == "staged"
+    assert rig.kinds()[-1] == "attempt_void"
+
+
+def test_order_hidden_through_the_cancel_window_is_booked_as_a_fill_after_reset(
+    tmp_path: Path,
+) -> None:
+    # The venue accepted the exit but answered neither the send nor any lookup in
+    # time, and it filled. Writing it off would leave the ledger holding shares the
+    # venue sold; leaving it unknown lets recovery book the fill.
+    rig = Rig(tmp_path, reject_duplicate_ids=True)
+    rig.venue.script("AAPL", OrderScript(timeout_after_accept=True))
+    rig.venue.lag_lookups(1_000)
+    rig.om.submit([order("AAPL", "sell", 10)])
+    assert rig.send_exit(X_AAPL) == "unknown"
+    rig.to(9, 31)  # it fills at the venue meanwhile
+    with pytest.raises(SessionIncomplete, match="still does not show it"):
+        rig.om.cancel_all("session_deadline")
+    assert "attempt_void" not in rig.kinds()
+    rig.venue._lagging_lookups = 0  # the venue shows it again
+    rig.kill.reset("david", PROFILE, PROFILE)
+    rig.restart()
+    assert rig.phase(X_AAPL) == "filled" and "AAPL" not in rig.om.account().positions
+    rig.reconciles()
 
 
 def test_cancel_finds_an_unknown_order_that_was_not_visible_at_first(tmp_path: Path) -> None:
