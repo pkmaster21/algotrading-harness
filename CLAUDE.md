@@ -39,7 +39,9 @@ not for routine strategy work.
 ## Scope (current)
 
 - Daily bars, US stocks/ETFs, long-only.
-- Historical data from Alpaca (read-only data API). No order placement anywhere yet.
+- Historical data from Alpaca (read-only data API). Orders go only to the Alpaca paper
+  account, sent by the paper runner (`harness/paper.py`) for a frozen profile. No live
+  trading anywhere.
 
 ## Stack
 

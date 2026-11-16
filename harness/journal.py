@@ -50,6 +50,11 @@ JournalKind = Literal[
     "order_closed",
     "approval",
     "command_refused",
+    # the paper runner (harness/paper.py)
+    "day_start",
+    "reconcile",
+    "decision",
+    "day_complete",
 ]
 
 
