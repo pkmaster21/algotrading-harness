@@ -55,6 +55,8 @@ JournalKind = Literal[
     "reconcile",
     "decision",
     "day_complete",
+    # operator commands applied outside a trading day (harness/control.py)
+    "control",
 ]
 
 

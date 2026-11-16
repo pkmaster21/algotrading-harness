@@ -30,7 +30,7 @@ from harness.broker.venue import (
     VenueOrderState,
     VenuePosition,
 )
-from harness.journal import Journal
+from harness.journal import Journal, JournalRecord
 from harness.models import AccountState, Fill, FrozenModel, Position, Stock
 
 _CENT = 0.005  # cash differences smaller than half a cent are float noise
@@ -133,30 +133,48 @@ class Ledger:
             if any(r.kind in ("fill", "adjustment") for r in records):
                 raise LedgerError("journal has fills or adjustments but no ledger_open record")
             journal.append("ledger_open", {"starting_cash": ledger._starting_cash})
+        ledger._replay(records)
+        ledger._journal = journal
+        return ledger
+
+    @classmethod
+    def from_records(cls, records: Sequence[JournalRecord]) -> Ledger:
+        """The ledger these journal records describe, for reading only: it is not tied
+        to a journal, so nothing done to it is recorded anywhere. Any process may build
+        one (from `read_journal`) without being the journal's writer."""
+        opened = next((r for r in records if r.kind == "ledger_open"), None)
+        if opened is None:
+            raise LedgerError("the journal has no ledger_open record")
+        try:
+            ledger = cls(float(opened.payload["starting_cash"]))  # type: ignore[arg-type]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LedgerError(f"journal record {opened.seq} does not replay: {exc}") from exc
+        ledger._replay(records)
+        return ledger
+
+    def _replay(self, records: Sequence[JournalRecord]) -> None:
         for record in records:
             try:
                 if record.kind == "ledger_open":
                     recorded = record.payload["starting_cash"]
-                    if recorded != ledger._starting_cash:
+                    if recorded != self._starting_cash:
                         raise LedgerError(
                             f"journal was opened with starting cash {recorded}, "
-                            f"not {ledger._starting_cash}"
+                            f"not {self._starting_cash}"
                         )
                 elif record.kind == "fill":
                     fill = Fill.model_validate(record.payload["fill"])
                     cumulative = record.payload["cumulative_quantity"]
-                    if not isinstance(cumulative, int) or not ledger._check_fill(fill, cumulative):
+                    if not isinstance(cumulative, int) or not self._check_fill(fill, cumulative):
                         raise LedgerError("fill was already applied")
-                    ledger._apply_fill(fill, cumulative)
+                    self._apply_fill(fill, cumulative)
                 elif record.kind == "adjustment":
                     adjustment = LedgerAdjustment.model_validate(record.payload)
-                    if not ledger._check_adjustment(adjustment):
+                    if not self._check_adjustment(adjustment):
                         raise LedgerError("adjustment was already applied")
-                    ledger._apply_adjustment(adjustment)
+                    self._apply_adjustment(adjustment)
             except (LedgerError, KeyError, ValidationError) as exc:
                 raise LedgerError(f"journal record {record.seq} does not replay: {exc}") from exc
-        ledger._journal = journal
-        return ledger
 
     # ------------------------------------------------------------------ changes
 

@@ -42,6 +42,7 @@ OrderUpdateReason = Literal[
     "session_deadline",
     "kill_switch",
     "unknown_outcome",
+    "flatten",
 ]
 EventKind = Literal[
     "exit_ignored_not_held",
