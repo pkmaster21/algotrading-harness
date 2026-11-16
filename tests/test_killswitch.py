@@ -364,6 +364,42 @@ def test_kill_still_cancels_when_the_latch_cannot_be_written(tmp_path: Path) -> 
     assert "other processes may not be" in message
 
 
+def test_kill_says_when_no_latch_is_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "KILL"
+
+    def disk_full(*args: object, **kw: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tempfile, "mkstemp", disk_full)
+    # The fallback leaves a bare file: other processes read that as engaged.
+    venue, alerts = venue_with_orders(), Recorder()
+    state = kill(
+        switch(path), "stop", "auto:runner", venue=venue, alerts=alerts, sleep=venue.advance
+    )
+    assert state.cancel_confirmed and state.latch_written and KillSwitch(path).engaged()
+    assert "NOT ON DISK" not in alerts.alerts[0].message
+
+    # Nothing at all reaches the disk: this process is stopped, the next one is not.
+    path.unlink()
+    monkeypatch.setattr(KillSwitch, "_engage_bare", lambda self: None)
+    latch, venue, alerts = switch(path), venue_with_orders(), Recorder()
+    state = kill(latch, "stop", "auto:runner", venue=venue, alerts=alerts, sleep=venue.advance)
+    assert state.engaged and state.cancel_confirmed and latch.engaged()
+    assert not state.latch_written and not path.exists()
+    assert not KillSwitch(path).engaged()  # what the next run sees
+    message = alerts.alerts[0].message
+    assert "THE LATCH IS NOT ON DISK, so the next run will NOT be refused" in message
+
+
+def test_latch_written_is_not_part_of_the_latch_file(tmp_path: Path) -> None:
+    path = tmp_path / "KILL"
+    state = kill(switch(path), "stop", "operator:cli")
+    assert state.latch_written and "latch_written" not in path.read_text()
+    assert KillSwitch(path).state().latch_written
+
+
 def test_kill_when_already_engaged_names_the_first_reason_and_still_cancels(
     tmp_path: Path,
 ) -> None:

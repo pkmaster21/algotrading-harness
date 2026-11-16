@@ -1078,10 +1078,11 @@ and `run` stay in `python -m harness.paper`.
   3 crashed, with the traceback on stderr. An uncaught exception would exit 1 by
   Python's default, which here means "something is left for you", so `main` catches
   everything.
-- Open (issue #32): if the latch file cannot be written, `killswitch.kill`
-  returns an in-memory `KillState(engaged=True)` and says so only in the alert, so
-  `kill` can print "engaged" and exit 0 with no latch on disk. `KillState` needs to
-  say whether the latch was written; the CLI then exits 1 when it was not.
+- Issue #32, closed: if the latch file cannot be written, `killswitch.kill` returns a
+  state with `latch_written` False (checked on disk, as another process would see it)
+  and says so in its alert, for every caller: the CLI, the runner and the order
+  manager. `harness.cli kill` then exits 1. Nothing can stop the next run in that
+  case, so the alert tells the operator not to start it.
 - It sets up no log file. Alerts reach `alerts.jsonl` through the commands' default
   sinks, and `alerts` prints them.
 

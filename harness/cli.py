@@ -215,6 +215,14 @@ def _profiles(args: argparse.Namespace, files: dict[str, Any], live: dict[str, A
 def _kill(args: argparse.Namespace, files: dict[str, Any], live: dict[str, Any]) -> int:
     state = control.engage_kill_switch(args.reason, args.operator, **live)
     print(f"kill switch engaged by {state.source or 'unknown'}: {state.reason}")
+    if not state.latch_written:
+        canceled = "were canceled" if state.cancel_confirmed else "are NOT confirmed canceled"
+        print(
+            "THE LATCH FILE WAS NOT WRITTEN, so nothing stops the next run. Open orders "
+            f"{canceled}. Do not start the runner; see the alerts, make the latch "
+            "writable, and run kill again."
+        )
+        return 1
     if state.cancel_confirmed:
         print("every open order at the venue is canceled. Positions were not touched.")
         return 0
