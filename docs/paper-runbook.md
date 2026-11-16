@@ -203,6 +203,13 @@ buy and hold enters again.
 Status 1 means a position is still held or the account and ledger differ: the output
 names each. Run `flatten` again, or sell at the broker and `accept`.
 
+Status 2 with "stopped part way" means the order manager could no longer vouch for an
+order (a sell whose outcome is unknown, or a cancel the venue did not confirm). The kill
+switch is engaged, and there is no closing reconciliation, "still held" list or
+`flatten` alert. Check `positions`, `orders`, `alerts` and the Alpaca dashboard. Then
+run `flatten` again (it looks unresolved orders up at the venue and compares the ledger
+with the account before it sells), or `reset-kill` to stop there.
+
 An auction sell the venue rejects is final: the flatten ends with the position held,
 and a second flatten before 09:25 is rejected the same way (issue #38). Run `flatten`
 again from 09:25 on, when it sends market orders.
