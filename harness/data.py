@@ -257,7 +257,7 @@ class DataError(RuntimeError):
 
 
 class BarFetcher(Protocol):
-    """Source of adjusted daily bars. AlpacaBarFetcher in production, fakes in tests."""
+    """Source of daily bars. AlpacaBarFetcher in production, fakes in tests."""
 
     def fetch(
         self, symbols: Sequence[str], start: dt.date, end: dt.date
@@ -266,7 +266,14 @@ class BarFetcher(Protocol):
 
         Each frame has columns date (datetime.date), open, high, low, close, volume, in
         date order. A symbol with no bars in range maps to an empty frame or is omitted.
+        Prices are adjusted for splits and dividends.
         """
+        ...
+
+    def fetch_raw(
+        self, symbols: Sequence[str], start: dt.date, end: dt.date
+    ) -> dict[str, pd.DataFrame]:
+        """The same bars with no adjustment: the prices as they traded that day."""
         ...
 
 
@@ -336,6 +343,16 @@ class AlpacaBarFetcher:
     def fetch(
         self, symbols: Sequence[str], start: dt.date, end: dt.date
     ) -> dict[str, pd.DataFrame]:
+        return self._request(symbols, start, end, self._cfg.adjustment)
+
+    def fetch_raw(
+        self, symbols: Sequence[str], start: dt.date, end: dt.date
+    ) -> dict[str, pd.DataFrame]:
+        return self._request(symbols, start, end, "raw")
+
+    def _request(
+        self, symbols: Sequence[str], start: dt.date, end: dt.date, adjustment: str
+    ) -> dict[str, pd.DataFrame]:
         from alpaca.data.enums import Adjustment, DataFeed
         from alpaca.data.models import BarSet
         from alpaca.data.requests import StockBarsRequest
@@ -348,7 +365,7 @@ class AlpacaBarFetcher:
             timeframe=TimeFrame(1, TimeFrameUnit("Day")),  # alpaca types .Day as str
             start=dt.datetime.combine(start, dt.time(0, 0), MARKET_TZ),
             end=dt.datetime.combine(end, dt.time(23, 59, 59), MARKET_TZ),
-            adjustment=Adjustment(self._cfg.adjustment),
+            adjustment=Adjustment(adjustment),
             feed=DataFeed(self._cfg.feed),
         )
         try:
@@ -540,6 +557,36 @@ class DataLoader:
         frames = {s: self._cache.read(s, start, before) for s in symbols}
         return BarPanel.from_frames(frames)
 
+    def raw_opens(
+        self, wanted: Sequence[tuple[dt.date, str]], *, paper: PaperAccess
+    ) -> dict[tuple[dt.date, str], float]:
+        """The unadjusted open of each (session, symbol) in `wanted` that has a bar:
+        the official open as it printed, which is what a live fill price is compared
+        with. The cached bars cannot answer this. They are adjusted, and an adjustment
+        reaches back from its ex-date, so even the bar of a session read the next
+        morning may already be moved by a dividend or split that goes ex that day.
+
+        For paper trading only, under the same rules as `load`: nothing later than the
+        last completed session, and the paper access log is written first (one line per
+        profile per day, so a day that already loaded adds none). Not cached: it is a
+        handful of bars, asked for once.
+        """
+        if not wanted:
+            return {}
+        cutoff = self.cutoff(None, paper)
+        start, end = min(d for d, _ in wanted), max(d for d, _ in wanted)
+        self._log_paper(paper, start, end)
+        symbols = list(dict.fromkeys(s for _, s in wanted))
+        frames = self._fetch(symbols, start, end, cutoff, raw=True)
+        opens: dict[tuple[dt.date, str], float] = {}
+        for symbol, frame in frames.items():
+            by_date = dict(zip(frame["date"], frame["open"], strict=True))
+            for session, wanted_symbol in wanted:
+                value = by_date.get(session) if wanted_symbol == symbol else None
+                if value is not None and value > 0:  # False for NaN
+                    opens[(session, symbol)] = float(value)
+        return opens
+
     def _log_holdout(self, access: HoldoutAccess, start: dt.date, end: dt.date) -> None:
         path = self.cfg.holdout_log
         row = [
@@ -598,7 +645,13 @@ class DataLoader:
     # ------------------------------------------------------------------ cache refresh
 
     def _fetch(
-        self, symbols: Sequence[str], start: dt.date, end: dt.date, cutoff: dt.date
+        self,
+        symbols: Sequence[str],
+        start: dt.date,
+        end: dt.date,
+        cutoff: dt.date,
+        *,
+        raw: bool = False,
     ) -> dict[str, pd.DataFrame]:
         if end >= cutoff:
             raise HoldoutViolation(f"refusing to request bars through {end} (cutoff {cutoff})")
@@ -607,7 +660,8 @@ class DataLoader:
         result: dict[str, pd.DataFrame] = {}
         for i in range(0, len(symbols), self.cfg.batch_size):
             batch = list(symbols[i : i + self.cfg.batch_size])
-            fetched = self._fetcher.fetch(batch, start, end)
+            fetch = self._fetcher.fetch_raw if raw else self._fetcher.fetch
+            fetched = fetch(batch, start, end)
             for s in batch:
                 frame = _clean(fetched.get(s))
                 dates = list(frame["date"])

@@ -23,8 +23,14 @@ The steps, with the kill latch checked between them:
    staged in the journal; nothing is sent. The risk state is saved, then the decision
    is journaled.
 6. `engine.on_session_open(today)`: the order manager works the staged orders.
-7. Reconcile again, write the derived files (`ledger.json`, `equity.csv`), and journal
-   `day_complete`.
+7. Reconcile again, write the derived files (`ledger.json`, `equity.csv`, `trades.csv`,
+   `summary.json`), and journal `day_complete`.
+
+`trades.csv` and `summary.json` (`harness/paper_report.py`) cover sessions through `t`:
+they need each session's bar, which first exists the morning after, so the fills of
+today's open appear in tomorrow's files. They are built from the journal alone. A
+journal they cannot be built from is a warning, the previous files stay, and the day
+still completes.
 
 **Safe to run twice.** The journal's `decision` record is the line between deciding and
 trading. A run that died before it decides again: the same bars and the same ledger give
@@ -105,6 +111,7 @@ from harness.orders import (
     StagedOrderChanged,
     WorkingOrder,
 )
+from harness.paper_report import PAPER_TRADE_COLUMNS, paper_report, unpriced_fills
 from harness.positions import Ledger, LedgerError, PnL, ReconcileReport, reconcile_venue
 from harness.profiles import (
     KILL_FILE,
@@ -124,7 +131,7 @@ from harness.profiles import (
     save_risk_state,
 )
 from harness.ratelimit import RateLimiter
-from harness.report import EQUITY_COLUMNS, _write_csv
+from harness.report import EQUITY_COLUMNS, ReportError, _json_safe, _write_csv
 from harness.risk import RiskManager, RiskStateError
 from harness.run import USER_ERRORS, _git_commit
 from harness.view import PRICE_FIELDS, MarketView
@@ -135,6 +142,8 @@ ALERTS_FILE = "alerts.jsonl"
 JOURNAL_FILE = "journal.jsonl"
 LEDGER_FILE = "ledger.json"
 EQUITY_FILE = "equity.csv"
+TRADES_FILE = "trades.csv"
+SUMMARY_FILE = "summary.json"
 SNAPSHOT_FILE = "config_snapshot.yaml"
 PENDING_FILE = "pending_approvals.json"
 INBOX_DIR = "inbox"
@@ -294,6 +303,7 @@ class _Day:
         self.session = now().astimezone(MARKET_TZ).date()  # replaced by the venue's date
         self.decided_on: dt.date | None = None
         self.resumed = False
+        self.strategy_name = ""  # as a backtest's summary names it; set when it is built
         # Set once the venue has confirmed this is the account the profile was
         # activated on. Until then a kill sets the latch and cancels nothing: the keys
         # may be for another account.
@@ -436,7 +446,7 @@ class _Day:
         self.kill_switch.check()
 
         self.reconcile_after = self._reconcile(profile, active, venue, journal, ledger, om, "after")
-        self._finish(journal, ledger, risk, om, closes, today, t)
+        self._finish(profile, journal, ledger, risk, om, closes, today, t)
         return "traded"
 
     # ------------------------------------------------------------------ steps
@@ -653,13 +663,15 @@ class _Day:
         recipe = profile.recipe
         universe = recipe.universe.symbols
         try:
-            strategy = _ProfileStrategy(
-                build_profile_strategy(profile, profiles_dir=profile.execution.profiles_dir)
-            )
+            inner = build_profile_strategy(profile, profiles_dir=profile.execution.profiles_dir)
         except ProfileTampered as exc:
             self._kill(f"profile {self.profile_id} does not verify: {exc}")
         except ProfileError as exc:
             self._fail("strategy", f"the profile's strategy cannot be used: {exc}")
+        strategy = _ProfileStrategy(inner)
+        # The frozen copy is imported from the profile's folder, so its module name says
+        # nothing: without a `name` of its own it is called what the recipe calls it.
+        self.strategy_name = type(inner).name or recipe.strategy.strategy
 
         def engine_for(capacity: int) -> Engine:
             try:
@@ -737,6 +749,9 @@ class _Day:
                 "which this attempt did not decide: the bars or the account changed in "
                 "between. Nothing is sent today.",
             )
+        fill_opens = self._fill_opens(profile, journal, t)
+        benchmark = recipe.backtest.benchmark
+        benchmark_close = panel.field("close")[-1, panel.column(benchmark)]
         # The mark first, then the record that says the decision is made: a rerun that
         # finds no record marks again, and the same equity changes nothing.
         save_risk_state(risk.state, self.state_dir, self.profile_id)
@@ -749,9 +764,39 @@ class _Day:
                 "equity": engine.equity[-1].model_dump(mode="json"),
                 "events": [e.model_dump(mode="json") for e in engine.events],
                 "data_fingerprint": panel.fingerprint(),
+                "fill_opens": fill_opens,
+                "benchmark_close": None if np.isnan(benchmark_close) else float(benchmark_close),
             },
         )
         return engine, closes
+
+    def _fill_opens(
+        self, profile: FrozenProfile, journal: Journal, t: dt.date
+    ) -> dict[str, JsonValue]:
+        """The official open of every fill through `t` that has none on record yet, as
+        the `decision` record carries it: `{session: {symbol: open}}`. Unadjusted, so it
+        is asked of the data source and not read from the bars just loaded (those are
+        adjusted, and a dividend or split that goes ex today has already moved them).
+
+        Only the report needs these. If they cannot be had, that is a warning, the
+        fills stay unmeasured, and the next decision asks again."""
+        recipe = profile.recipe
+        loader = self.loader or DataLoader(recipe.dates, recipe.data, now=self.now)
+        try:
+            wanted = unpriced_fills(list(journal.read()), t)
+            opens = loader.raw_opens(wanted, paper=paper_access_for(profile))
+        except (ReportError, DataError, PaperLogError) as exc:
+            self._alert(
+                "warn",
+                "report",
+                f"the fills through {t} could not be compared with their official opens "
+                f"today: {exc}",
+            )
+            return {}
+        found: dict[str, dict[str, JsonValue]] = {}
+        for (session, symbol), value in opens.items():
+            found.setdefault(session.isoformat(), {})[symbol] = value
+        return dict(found)
 
     def _load_bars(self, profile: FrozenProfile, t: dt.date) -> BarPanel:
         recipe = profile.recipe
@@ -804,6 +849,7 @@ class _Day:
 
     def _finish(
         self,
+        profile: FrozenProfile,
         journal: Journal,
         ledger: Ledger,
         risk: RiskManager,
@@ -815,8 +861,9 @@ class _Day:
         """Derived files first, then the record that says the day is done: a crash in
         between repeats this step, which only rewrites the same files."""
         ledger.write_snapshot(self.folder / LEDGER_FILE)
+        records = list(journal.read())
         points: dict[dt.date, EquityPoint] = {}
-        for record in journal.read():
+        for record in records:
             if record.kind == "decision":
                 point = EquityPoint.model_validate(record.payload["equity"])
                 points[point.date] = point
@@ -825,6 +872,7 @@ class _Day:
             EQUITY_COLUMNS,
             [points[d].model_dump() for d in sorted(points)],
         )
+        self._write_report(profile, records, closes, t)
         self._write_pending(om, today)
         try:
             self.pnl = ledger.pnl(closes, t, prior_equity=risk.state.prior_equity)
@@ -837,6 +885,38 @@ class _Day:
                 "decided_on": t.isoformat(),
                 "orders": {o.order_id: o.phase for o in om.orders() if o.order.created_on == t},
             },
+        )
+
+    def _write_report(
+        self,
+        profile: FrozenProfile,
+        records: Sequence[JournalRecord],
+        closes: Mapping[str, float],
+        t: dt.date,
+    ) -> None:
+        """`trades.csv` and `summary.json` for sessions through `t`. Derived, and not
+        needed to trade: a journal they cannot be built from is a warning, and the
+        files of the day before stay as they are."""
+        try:
+            trades, summary = paper_report(
+                records,
+                profile.recipe,
+                profile_id=self.profile_id,
+                strategy=self.strategy_name,
+                through=t,
+                marks=closes,
+            )
+        except ReportError as exc:
+            self._alert(
+                "warn",
+                "report",
+                f"{TRADES_FILE} and {SUMMARY_FILE} were not updated for {t}: {exc}",
+            )
+            return
+        _write_csv_atomic(self.folder / TRADES_FILE, PAPER_TRADE_COLUMNS, trades)
+        _write_atomic(
+            self.folder / SUMMARY_FILE,
+            (json.dumps(_json_safe(summary), indent=2) + "\n").encode(),
         )
 
     # ------------------------------------------------------------------ helpers

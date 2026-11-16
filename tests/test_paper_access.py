@@ -198,3 +198,46 @@ def test_only_the_profiles_module_builds_paper_access() -> None:
         if builds.search(text):
             assert path.name in allowed, f"{path.name} builds a PaperAccess"
     assert "paper=" not in (HARNESS / "run.py").read_text()
+
+
+# --------------------------------------------------------------------------- unadjusted opens
+
+
+def test_raw_opens_are_unadjusted_and_go_through_the_paper_log(tmp_path: Path) -> None:
+    config = tmp_config(tmp_path)
+    fetcher = FakeFetcher()
+    fetcher.scale_before["SPY"] = (YESTERDAY, 0.5)  # a split that goes ex on the last session
+    loader = _loader(config, fetcher)
+    monday, friday = dt.date(2026, 6, 29), dt.date(2026, 6, 26)
+    wanted = [(monday, "SPY"), (YESTERDAY, "AAPL"), (dt.date(2026, 6, 27), "SPY")]  # a Saturday
+    opens = loader.raw_opens(wanted, paper=PAPER)
+    assert opens == {
+        (monday, "SPY"): fetcher.price("SPY", monday, raw=True) - 0.1,
+        (YESTERDAY, "AAPL"): fetcher.price("AAPL", YESTERDAY) - 0.1,
+    }  # no bar on the Saturday, so no open
+    assert fetcher.price("SPY", monday) == fetcher.price("SPY", monday, raw=True) / 2
+    assert fetcher.raw_requests == [(("SPY", "AAPL"), dt.date(2026, 6, 27), YESTERDAY)]
+    assert fetcher.requests == []  # nothing adjusted was asked for, and nothing is cached
+    assert not list(recipe(config).data.cache_dir.glob("*.parquet"))
+    (row,) = read_paper_access_log(recipe(config).data.paper_access_log)
+    assert (row["profile_id"], row["data_end"]) == (PAPER.profile_id, YESTERDAY.isoformat())
+    # The same day's load adds no second line, and nothing asked for means no request.
+    loader.load(["SPY"], paper=PAPER)
+    assert loader.raw_opens([], paper=PAPER) == {}
+    assert len(read_paper_access_log(recipe(config).data.paper_access_log)) == 1
+    assert len(fetcher.raw_requests) == 1 and friday < monday
+
+
+def test_raw_opens_stop_at_the_last_completed_session_and_need_the_log(tmp_path: Path) -> None:
+    config = tmp_config(tmp_path)
+    fetcher = FakeFetcher()
+    loader = _loader(config, fetcher)
+    today = YESTERDAY + dt.timedelta(days=1)
+    with pytest.raises(HoldoutViolation):
+        loader.raw_opens([(today, "SPY")], paper=PAPER)
+    log = recipe(config).data.paper_access_log
+    log.unlink()
+    log.mkdir()  # the log cannot be written
+    with pytest.raises(PaperLogError):
+        loader.raw_opens([(YESTERDAY, "SPY")], paper=PAPER)
+    assert fetcher.raw_requests == []

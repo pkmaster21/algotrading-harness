@@ -20,19 +20,21 @@ class FakeFetcher:
 
     `listed`/`delisted` bound a symbol's history. `scale_before` simulates a corporate
     action: bars before that date are multiplied by `scale`, as a vendor's adjusted
-    history would be after a split or dividend. Every request is recorded.
+    history would be after a split or dividend. `fetch_raw` ignores it: unadjusted
+    prices never change. Every request is recorded.
     """
 
     def __init__(self) -> None:
         self.requests: list[tuple[tuple[str, ...], dt.date, dt.date]] = []
+        self.raw_requests: list[tuple[tuple[str, ...], dt.date, dt.date]] = []
         self.listed: dict[str, dt.date] = {}
         self.delisted: dict[str, dt.date] = {}
         self.scale_before: dict[str, tuple[dt.date, float]] = {}
 
-    def price(self, symbol: str, day: dt.date) -> float:
+    def price(self, symbol: str, day: dt.date, *, raw: bool = False) -> float:
         base = 20.0 + sum(ord(c) for c in symbol) % 50
         value = base + (day.toordinal() % 97) * 0.5 + (day.toordinal() - 738000) * 0.01
-        if symbol in self.scale_before and day < self.scale_before[symbol][0]:
+        if not raw and symbol in self.scale_before and day < self.scale_before[symbol][0]:
             value *= self.scale_before[symbol][1]
         return value
 
@@ -40,6 +42,17 @@ class FakeFetcher:
         self, symbols: Sequence[str], start: dt.date, end: dt.date
     ) -> dict[str, pd.DataFrame]:
         self.requests.append((tuple(symbols), start, end))
+        return self._bars(symbols, start, end, raw=False)
+
+    def fetch_raw(
+        self, symbols: Sequence[str], start: dt.date, end: dt.date
+    ) -> dict[str, pd.DataFrame]:
+        self.raw_requests.append((tuple(symbols), start, end))
+        return self._bars(symbols, start, end, raw=True)
+
+    def _bars(
+        self, symbols: Sequence[str], start: dt.date, end: dt.date, *, raw: bool
+    ) -> dict[str, pd.DataFrame]:
         out = {}
         for s in symbols:
             rows = []
@@ -49,7 +62,7 @@ class FakeFetcher:
                 live &= s not in self.listed or day >= self.listed[s]
                 live &= s not in self.delisted or day < self.delisted[s]
                 if live:
-                    c = self.price(s, day)
+                    c = self.price(s, day, raw=raw)
                     rows.append({"date": day, "open": c - 0.1, "high": c + 0.4,
                                  "low": c - 0.4, "close": c, "volume": 1e6})  # fmt: skip
                 day += dt.timedelta(days=1)
