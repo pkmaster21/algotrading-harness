@@ -14,7 +14,9 @@ from harness.broker.alpaca import VenueSetupError
 from harness.broker.venue import (
     KillSwitchEngaged,
     VenueDataError,
+    VenueOrder,
     VenueOrderState,
+    VenueRejected,
     VenueUnavailable,
 )
 from harness.config import ExecutionConfig, RiskConfig
@@ -496,8 +498,84 @@ def test_rejected_exit_is_a_critical_alert(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     rig.venue.script("AAPL", OrderScript(reject="halted"))
     rig.om.submit([order("AAPL", "sell", 10)])
-    assert rig.send_exit(X_AAPL) == "rejected"
+    rig.to(9, 31)
+    assert rig.send_exit(X_AAPL, "day") == "rejected"
     assert rig.alerts.alerts[0].severity == "critical"
+
+
+def test_rejected_auction_exit_stays_alive_for_a_day_order(tmp_path: Path) -> None:
+    # Issue #38: the auction refusing a sell must not end the exit.
+    rig = Rig(tmp_path)
+    rig.venue.script("AAPL", OrderScript(reject="opg not accepted"))
+    rig.om.submit([order("AAPL", "sell", 10)])
+    assert rig.send_exit(X_AAPL) == "staged"
+    assert rig.om.poll_updates() == []  # not closed: nothing to report yet
+    (alert,) = rig.alerts.alerts
+    assert (alert.severity, alert.kind) == ("critical", "order_rejected")
+    assert "opg not accepted" in alert.message and "market day order" in alert.message
+    void = read_journal(rig.path)[-1]
+    assert void.kind == "attempt_void" and void.payload["auction_refused"] is True
+    assert rig.venue.open_orders() == []
+
+    rig.to(9, 31)
+    assert rig.send_exit(X_AAPL, "day") == "filled"
+    assert [o.client_order_id for o in rig.venue.place_attempts] == [X_AAPL + "-a1", X_AAPL + "-a2"]
+    assert "AAPL" not in rig.om.account().positions
+    rig.reconciles()
+
+
+def test_venue_that_remembers_a_rejected_id_still_takes_the_day_order(tmp_path: Path) -> None:
+    # What the new client id is for: a venue that keeps a rejected request on record
+    # refuses that id from then on.
+    class Remembers(FakeVenue):
+        def place(self, order: VenueOrder) -> VenueOrderState:
+            if order.client_order_id in rejected:
+                raise VenueRejected("client_order_id must be unique")
+            try:
+                return super().place(order)
+            except VenueRejected:
+                rejected.add(order.client_order_id)
+                raise
+
+    rejected: set[str] = set()
+    rig = Rig(tmp_path, venue_class=Remembers)
+    rig.venue.script("AAPL", OrderScript(reject="opg not accepted"))
+    rig.om.submit([order("AAPL", "sell", 10)])
+    assert rig.send_exit(X_AAPL) == "staged"
+    rig.to(9, 31)
+    assert rig.send_exit(X_AAPL, "day") == "filled"
+    assert rejected == {X_AAPL + "-a1"}
+
+
+def test_unanswered_day_order_after_a_refusal_keeps_its_own_id(tmp_path: Path) -> None:
+    # Only the rejected auction attempt is never reused. The day order that follows is
+    # resent under its own id like any attempt whose send got no answer.
+    rig = Rig(tmp_path)
+    rig.venue.script("AAPL", OrderScript(reject="opg not accepted"))
+    rig.om.submit([order("AAPL", "sell", 10)])
+    assert rig.send_exit(X_AAPL) == "staged"
+    rig.venue.script("AAPL", OrderScript(timeouts_before_accept=10_000))
+    assert rig.send_exit(X_AAPL, "day") == "unknown"
+    rig.venue.script("AAPL", OrderScript())
+    rig.to(9, 31)
+    assert rig.send_exit(X_AAPL, "day") == "filled"
+    assert {o.client_order_id for o in rig.venue.place_attempts} == {
+        X_AAPL + "-a1",
+        X_AAPL + "-a2",
+    }
+
+
+def test_day_order_rejected_after_the_auction_refused_is_final(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.venue.script("AAPL", OrderScript(reject="opg not accepted"))
+    rig.om.submit([order("AAPL", "sell", 10)])
+    assert rig.send_exit(X_AAPL) == "staged"
+    rig.venue.script("AAPL", OrderScript(reject="halted"))
+    assert rig.send_exit(X_AAPL, "day") == "rejected"
+    (update,) = rig.om.poll_updates()
+    assert (update.status, update.reason) == ("rejected", "broker_rejected")
+    assert [a.severity for a in rig.alerts.alerts] == ["critical", "critical"]
+    assert "market day order" not in rig.alerts.alerts[1].message
 
 
 def test_timeout_after_the_venue_accepted_adopts_the_order(tmp_path: Path) -> None:
@@ -598,7 +676,7 @@ def test_first_send_rejected_is_still_final(tmp_path: Path) -> None:
     rig.venue.script("AAPL", OrderScript(reject="halted"))
     rig.om.submit([order("AAPL", "sell", 10)])
     rig.venue.calls.clear()
-    assert rig.send_exit(X_AAPL) == "rejected"
+    assert rig.send_exit(X_AAPL, "day") == "rejected"
     assert [m for m, _ in rig.venue.calls] == ["place"]
 
 
@@ -823,11 +901,39 @@ def test_venue_rejecting_after_accepting_ends_the_order(tmp_path: Path) -> None:
 
     rig = Rig(tmp_path, venue_class=RejectsLater)
     rig.om.submit([order("AAPL", "sell", 10)])
-    rig.send_exit(X_AAPL)
+    rig.send_exit(X_AAPL, "day")
     rig.om.refresh()
     assert rig.phase(X_AAPL) == "rejected"
     assert rig.om.poll_updates()[-1].reason == "broker_rejected"
     assert rig.alerts.alerts[-1].severity == "critical"
+
+
+class RejectsAuctionLater(Tampering):
+    """Accepts an `opg` order, then reports it rejected."""
+
+    def get_order(self, client_order_id: str) -> VenueOrderState | None:
+        state = super().get_order(client_order_id)
+        if state is None or self._orders[client_order_id].order.time_in_force != "opg":
+            return state
+        self._orders[client_order_id].status = "rejected"  # it will never trade
+        return state.model_copy(update={"status": "rejected"})
+
+
+def test_auction_order_rejected_after_acceptance_stays_alive(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, venue_class=RejectsAuctionLater)
+    rig.om.submit([order("AAPL", "sell", 10)])
+    assert rig.send_exit(X_AAPL) == "working"
+    rig.om.refresh()
+    assert rig.phase(X_AAPL) == "idle" and rig.om.poll_updates() == []
+    (alert,) = rig.alerts.alerts
+    assert alert.severity == "critical" and "after accepting it" in alert.message
+
+    rig.restart()  # the restarted manager settles the attempt again, without a new alert
+    assert rig.phase(X_AAPL) == "idle" and len(rig.alerts.alerts) == 1
+    rig.to(9, 31)
+    assert rig.send_exit(X_AAPL, "day") == "filled"
+    assert [o.client_order_id for o in rig.venue.place_attempts] == [X_AAPL + "-a1", X_AAPL + "-a2"]
+    rig.reconciles()
 
 
 # --------------------------------------------------------------------------- cancel

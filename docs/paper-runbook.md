@@ -210,9 +210,10 @@ switch is engaged, and there is no closing reconciliation, "still held" list or
 run `flatten` again (it looks unresolved orders up at the venue and compares the ledger
 with the account before it sells), or `reset-kill` to stop there.
 
-An auction sell the venue rejects is final: the flatten ends with the position held,
-and a second flatten before 09:25 is rejected the same way (issue #38). Run `flatten`
-again from 09:25 on, when it sends market orders.
+An auction sell the venue rejects raises a critical `order_rejected` alert and goes out
+again at once as a market `day` order, which waits for the open like any order sent
+before it. If the venue rejects that one too, the sell ends `rejected` and the position
+is still held: read the alert for the venue's reason before running `flatten` again.
 
 ### Ctrl-C during flatten
 

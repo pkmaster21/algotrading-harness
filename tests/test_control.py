@@ -124,6 +124,20 @@ def test_flatten_before_the_open_goes_into_the_auction(tmp_path: Path) -> None:
     assert "reset it to trade again" in rig.alerts.alerts[-1].message
 
 
+def test_flatten_whose_auction_sell_is_rejected_sells_with_a_day_order(tmp_path: Path) -> None:
+    # Issue #38: the flatten used to end at once with the position held.
+    rig, quantity = holding_spy(tmp_path)
+    rig.morning(D2)
+    rig.venue.script("SPY", OrderScript(reject="opg not accepted"))
+    before = len(rig.venue.place_attempts)
+    report = control.flatten(ME, rig.profile_id, **kw(rig))
+    sent = rig.venue.place_attempts[before:]
+    assert [(o.quantity, o.time_in_force) for o in sent] == [(quantity, "opg"), (quantity, "day")]
+    assert report.remaining == {} and rig.held() == {}
+    assert [(o.phase, o.filled_quantity) for o in report.orders] == [("filled", quantity)]
+    assert "order_rejected" in [a.kind for a in rig.alerts.alerts]
+
+
 def test_flatten_cancels_what_is_open_and_never_buys(tmp_path: Path) -> None:
     rig = OrdersRig(tmp_path)  # holds AAPL 10 and TSLA 5; it is 08:00
     rig.om.submit([order("MSFT", "buy", 3), order("AAPL", "sell", 10)])

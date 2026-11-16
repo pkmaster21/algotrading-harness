@@ -146,6 +146,84 @@ def test_auction_order_still_working_at_the_exit_deadline_is_replaced(
     rig.reconciles()
 
 
+# --------------------------------------------------------------------------- a rejected auction
+
+
+def test_exit_the_auction_rejects_goes_out_as_a_day_order_at_once(tmp_path: Path) -> None:
+    # Issue #38. The day order goes out under a new client id: the venue may remember
+    # the rejected request, and would then refuse its id a second time.
+    rig = Rig(tmp_path)
+    rig.venue.script("AAPL", OrderScript(reject="opg not accepted"))
+    rig.om.submit([order("AAPL", "sell", 10), order("MSFT", "buy", 3)])
+    assert run(rig) == [(X_AAPL, "filled", "", 10), (E_MSFT, "filled", "", 3)]
+    assert [(o.client_order_id, o.time_in_force) for o in rig.venue.place_attempts] == [
+        (X_AAPL + "-a1", "opg"),
+        (X_AAPL + "-a2", "day"),
+        (E_MSFT + "-a1", "day"),
+    ]
+    # Not held back until the cutoff: the day order was at the venue before the open.
+    assert rig.venue._orders[X_AAPL + "-a2"].updated_at < at(D1, 9, 31)
+    assert placed_at(rig, E_MSFT + "-a1") < EXIT_DEADLINE
+    assert [(a.severity, a.kind) for a in rig.alerts.alerts] == [("critical", "order_rejected")]
+    rig.reconciles()
+
+
+def test_restart_after_a_rejected_auction_order_does_not_try_the_auction_again(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.venue.script("AAPL", OrderScript(reject="opg not accepted"))
+    rig.om.submit([order("AAPL", "sell", 10)])
+    assert rig.send_exit(X_AAPL) == "staged"
+    rig.restart()
+    assert rig.phase(X_AAPL) == "staged"
+    assert run(rig) == [(X_AAPL, "filled", "", 10)]  # still before the auction cutoff
+    assert [(o.client_order_id, o.time_in_force) for o in rig.venue.place_attempts] == [
+        (X_AAPL + "-a1", "opg"),
+        (X_AAPL + "-a2", "day"),  # the restarted manager does not reuse the id either
+    ]
+    assert len(rig.alerts.alerts) == 1
+    rig.reconciles()
+
+
+def test_exit_rejected_by_the_auction_and_then_as_a_day_order_ends_rejected(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.venue.trading_blocked = True  # every order is refused
+    rig.om.submit([order("AAPL", "sell", 10)])
+    assert run(rig) == [(X_AAPL, "rejected", "broker_rejected", 0)]
+    assert [o.time_in_force for o in rig.venue.place_attempts] == ["opg", "day"]  # no loop
+    assert rig.om.account().positions["AAPL"].quantity == 10
+    assert [a.kind for a in rig.alerts.alerts] == ["order_rejected", "order_rejected"]
+
+
+@pytest.mark.parametrize("after_write", [False, True])
+def test_crash_around_the_rejected_auction_order_still_sells(
+    tmp_path: Path, after_write: bool
+) -> None:
+    baseline = Rig(tmp_path / "baseline")
+    baseline.venue.script("AAPL", OrderScript(reject="opg not accepted"))
+    baseline.om.submit([order("AAPL", "sell", 10)])
+    baseline.om.on_session_open(D1, {})
+    kinds = baseline.kinds()
+    first = kinds.index("order_staged") + 1
+    for seq in range(first, len(kinds) + 1):
+        rig = Rig(tmp_path / f"crash-{seq}")
+        rig.venue.script("AAPL", OrderScript(reject="opg not accepted"))
+        assert rig.journal is not None
+        rig.journal.crash_at, rig.journal.crash_after_write = seq, after_write
+        with pytest.raises(Crash):
+            rig.om.submit([order("AAPL", "sell", 10)])
+            rig.om.on_session_open(D1, {})
+        rig.restart()
+        rig.om.submit([order("AAPL", "sell", 10)])
+        rig.om.on_session_open(D1, {})
+        assert rig.phase(X_AAPL) == "filled", f"crash at record {seq}"
+        assert rig.venue.open_orders() == [] and not rig.kill.engaged()
+        rig.reconciles()
+
+
 # --------------------------------------------------------------------------- exits that do not fill
 
 

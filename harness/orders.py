@@ -97,6 +97,7 @@ _PROFILE_TAG = re.compile(r"^[A-Za-z0-9]{8}$")
 # of one symbol for one session. No strategy order has it.
 _FLATTEN_REASON = re.compile(r"^operator:flatten:([1-9][0-9]*)$")
 _SOURCE = "auto:orders"
+_AUCTION_REFUSED = ". It was an auction (opg) order; it goes out again as a market day order"
 
 
 class OrderManagerError(RuntimeError):
@@ -241,6 +242,9 @@ class _Tracked:
     fill_reason: OrderUpdateReason = ""  # reported with the final fill of a cut order
     approval: ApprovalState = "none"
     approved_hash: str = ""
+    # The venue rejected an auction (`opg`) attempt of this order. The order stays alive
+    # and its next attempt is a market `day` order, never the auction again.
+    auction_refused: bool = False
 
     def __post_init__(self) -> None:
         self.quantity = self.quantity or self.order.quantity
@@ -415,6 +419,10 @@ class OrderManager(Broker):
 
         last = tracked.last
         reuse = last is not None and last.state in ("sending", "void")
+        if reuse and last is not None and tracked.auction_refused:
+            # The auction order the venue rejected keeps its client id to itself: the
+            # venue may remember a rejected request, and would then refuse the id again.
+            reuse = not (last.state == "void" and last.venue_order.time_in_force == "opg")
         number = last.number if last is not None and reuse else len(tracked.attempts) + 1
         try:
             venue_order = VenueOrder(
@@ -492,13 +500,20 @@ class OrderManager(Broker):
                     if attempt.state == "sending":  # not found, or the lookup failed
                         self._mark_unknown(tracked, attempt, f"the resend was rejected ({exc})")
                     return
-                self._void(tracked, attempt, f"rejected by the venue: {exc}")
+                auction = attempt.venue_order.time_in_force == "opg"
+                self._void(tracked, attempt, f"rejected by the venue: {exc}", auction)
                 self._alert(
                     "critical" if tracked.side == "sell" else "warn",
                     "order_rejected",
-                    f"the venue rejected {client_id}: {exc}",
+                    f"the venue rejected {client_id}: {exc}"
+                    + (_AUCTION_REFUSED if auction else ""),
                 )
-                self._close(tracked, "rejected", "broker_rejected")
+                if auction:
+                    # The auction refusing an order says nothing about a `day` order:
+                    # nothing is at the venue, and the caller sends it again that way.
+                    tracked.phase = "idle" if tracked.filled else "staged"
+                else:
+                    self._close(tracked, "rejected", "broker_rejected")
                 return
             except VenueDataError as exc:
                 self._violation(f"the venue's data cannot be trusted: {exc}")
@@ -659,12 +674,19 @@ class OrderManager(Broker):
         if attempt.state != "final":
             tracked.phase = "working"
         elif attempt.venue_status == "rejected":
-            self._alert(
-                "critical" if tracked.side == "sell" else "warn",
-                "order_rejected",
-                f"the venue rejected {attempt.venue_order.client_order_id} after accepting it",
-            )
-            self._close(tracked, "rejected", "broker_rejected")
+            auction = attempt.venue_order.time_in_force == "opg"
+            if not (auction and tracked.auction_refused):  # recovery settles it again
+                self._alert(
+                    "critical" if tracked.side == "sell" else "warn",
+                    "order_rejected",
+                    f"the venue rejected {attempt.venue_order.client_order_id} after "
+                    f"accepting it" + (_AUCTION_REFUSED if auction else ""),
+                )
+            if auction:
+                tracked.auction_refused = True  # replay reads this from the venue state
+                tracked.phase = "idle"
+            else:
+                self._close(tracked, "rejected", "broker_rejected")
         else:
             # Canceled or expired with shares unfilled: which of the two the venue used
             # does not matter. Nothing is at the venue; the caller decides what is next.
@@ -864,8 +886,12 @@ class OrderManager(Broker):
                     state = VenueOrderState.model_validate(payload["state"])
                     attempt.venue_status = state.status
                     attempt.state = "final" if state.is_terminal else "open"
+                    if state.status == "rejected" and attempt.venue_order.time_in_force == "opg":
+                        self._orders[str(payload["order_id"])].auction_refused = True
                 elif record.kind == "attempt_void":
                     self._attempt(payload).state = "void"
+                    if payload.get("auction_refused") is True:
+                        self._orders[str(payload["order_id"])].auction_refused = True
                 elif record.kind == "entries_blocked":
                     self._blocked.add(dt.date.fromisoformat(str(payload["signal_date"])))
                 elif record.kind == "order_closed":
@@ -958,7 +984,8 @@ class OrderManager(Broker):
         1. Exits go into the opening auction (market, `opg`) until `opg_cutoff`; later
            ones go as market `day` orders. Whatever an auction order leaves unfilled is
            sent again as a market `day` order, and an auction order still working at
-           `exit_deadline` is canceled and sent that way too.
+           `exit_deadline` is canceled and sent that way too. So is one the venue
+           rejects, at once (a critical alert); a rejected `day` order is final.
         2. Entries wait for the open, and for every exit to be final or `exit_deadline`.
            Each is then checked against the actual account (`RiskManager.review_release`),
            cut or refused if it no longer fits, and sent as a limit `day` order capped
@@ -1066,7 +1093,7 @@ class OrderManager(Broker):
             tracked.order_id,
             session,
             type="market",
-            time_in_force="opg" if auction_open else "day",
+            time_in_force="opg" if auction_open and not tracked.auction_refused else "day",
         )
 
     def _work_entry(self, tracked: _Tracked, session: dt.date) -> None:
@@ -1132,7 +1159,8 @@ class OrderManager(Broker):
            not corrected here (`accept_broker_state` does that).
         3. One sell is staged per position and worked as the open workflow works an
            exit: into the opening auction before `opg_cutoff`, as a market `day` order
-           after it, sent again if an attempt ends with shares left.
+           after it, sent again if an attempt ends with shares left or the venue
+           rejects the auction order.
         4. At `until` whatever is still working is canceled and confirmed, and each
            sell that did not fill in full is a critical alert.
 
@@ -1544,12 +1572,19 @@ class OrderManager(Broker):
             raise OrderManagerError(f"unknown order {order_id}")
         return tracked
 
-    def _void(self, tracked: _Tracked, attempt: _Attempt, why: str) -> None:
-        self._journal.append(
-            "attempt_void",
-            {"order_id": tracked.order_id, "attempt": attempt.number, "why": why},
-        )
+    def _void(
+        self, tracked: _Tracked, attempt: _Attempt, why: str, auction_refused: bool = False
+    ) -> None:
+        record: dict[str, JsonValue] = {
+            "order_id": tracked.order_id,
+            "attempt": attempt.number,
+            "why": why,
+        }
+        if auction_refused:
+            record["auction_refused"] = True
+        self._journal.append("attempt_void", record)
         attempt.state = "void"
+        tracked.auction_refused = tracked.auction_refused or auction_refused
 
     def _block_entries(self, signal_date: dt.date) -> None:
         if signal_date not in self._blocked:
