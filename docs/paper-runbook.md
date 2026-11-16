@@ -187,6 +187,11 @@ Sells already sent stay at Alpaca and the kill switch stays engaged. `status` an
 `positions` show how far it got, and `flatten` can be run again: it cancels what is
 open, compares the ledger with the account, and sells what is left.
 
+If you decide not to sell after all: `kill` (it cancels the open sell), `reset-kill`,
+then run. The runner closes the sell the flatten left behind and never sends it, with
+a `flatten_unfinished` alert; the position stays. Until that run, `orders` still shows
+the sell as not final.
+
 ## The drawdown halt
 
 When equity falls far enough below its peak (the profile's risk preset), entries stop

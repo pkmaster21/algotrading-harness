@@ -600,19 +600,42 @@ class _Day:
     def _settle_earlier_orders(self, om: OrderManager, t: dt.date) -> None:
         """The order manager works any open order decided before the session; it does
         not know the calendar. Only orders decided on `t` may be worked today, so what
-        an unfinished earlier day left behind is closed here, before anything else."""
+        an unfinished earlier day left behind is closed here, before anything else.
+
+        So is a sell of the operator's flatten that an interrupted flatten left open,
+        whatever its date (a flatten dates its sells `t` too). Selling everything was
+        asked of that command, not of this run: the runner never sends it."""
         earlier = [
-            o for o in om.orders() if o.phase not in TERMINAL_PHASES and o.order.created_on != t
+            o
+            for o in om.orders()
+            if o.phase not in TERMINAL_PHASES
+            and (o.order.created_on != t or flatten_number(o.order) is not None)
         ]
         for order in earlier:
             if order.order.created_on > t or order.phase not in ("staged", "idle"):
+                if flatten_number(order.order) is not None:
+                    self._kill(
+                        f"flatten sell {order.order_id}, left by an interrupted flatten, is "
+                        f"{order.phase}: it may still be at the venue. Run flatten again, or "
+                        "engage the kill switch to cancel it"
+                    )
                 self._kill(
                     f"order {order.order_id}, decided on {order.order.created_on}, is "
                     f"{order.phase}; only orders decided on {t} can be open today"
                 )
         for order in earlier:
-            om.close(order.order_id, "canceled", "session_deadline")
             unsold = order.quantity - order.filled_quantity
+            if flatten_number(order.order) is not None:
+                om.close(order.order_id, "canceled", "flatten")
+                self._alert(
+                    "critical",
+                    "flatten_unfinished",
+                    f"flatten sell {order.order_id} was left unfinished by an interrupted "
+                    f"flatten: {unsold} of {order.quantity} shares unsold. It is closed and "
+                    "was not sent; the position remains. To sell it, run flatten again.",
+                )
+                continue
+            om.close(order.order_id, "canceled", "session_deadline")
             if order.order.action == "exit":
                 self._alert(
                     "critical",
