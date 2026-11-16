@@ -172,6 +172,10 @@ market is open. It refuses on a day without a session,
 after the close, and while the runner is running (engage the kill switch first to stop
 a running day).
 
+It also refuses on an account that fails the setup check (blocked, or one that may short
+or borrow): fix the account settings first, or sell in the Alpaca dashboard and `accept`.
+`kill` is different: it cancels open orders on such an account all the same.
+
 It engages the kill switch as soon as the confirmation matches and leaves it engaged:
 otherwise the next run would decide against a flat account and buy straight back. The
 way back to trading is `reset-kill`. The next run then decides from a flat account, so
