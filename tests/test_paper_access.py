@@ -187,12 +187,12 @@ def test_anything_else_is_not_a_profile_id(profile_id: str) -> None:
         PaperAccess(profile_id=profile_id)
 
 
-def test_nothing_in_the_harness_builds_paper_access_yet() -> None:
-    # One choke point: only the paper runner may build a PaperAccess, from a profile it
-    # has loaded and verified. Until that exists, no harness code builds one at all, and
-    # the backtest entry point never passes one.
+def test_only_the_profiles_module_builds_paper_access() -> None:
+    # One choke point: `harness.profiles.paper_access_for` builds a PaperAccess from a
+    # profile it has loaded and verified. No other harness code builds one, and the
+    # backtest entry point never passes one.
     builds = re.compile(r"PaperAccess\(")
-    allowed = {"paper.py"}  # the runner, when it exists
+    allowed = {"profiles.py"}
     for path in HARNESS.rglob("*.py"):
         text = path.read_text().replace("class PaperAccess(FrozenModel)", "")
         if builds.search(text):

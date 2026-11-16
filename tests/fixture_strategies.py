@@ -51,6 +51,25 @@ class Churn(Strategy):
         return signals
 
 
+class CallCounter(Strategy):
+    """Keeps state across `on_bar` calls on purpose: it alternates enter and exit by
+    counting calls. A daily process rebuilds the strategy every session, so the count
+    starts over and the signals change. The restart-equivalence check must catch it."""
+
+    name = "test_call_counter"
+
+    def __init__(self, params: FrozenModel | None = None) -> None:
+        super().__init__(params)
+        self.calls = 0
+
+    def on_bar(self, view: MarketView, portfolio: PortfolioSnapshot) -> Sequence[Signal]:
+        self.calls += 1
+        symbol = view.symbols[0]
+        if self.calls % 2:
+            return [] if portfolio.holds(symbol) else [Signal.enter(symbol, strength=1.0)]
+        return [Signal.exit(symbol)] if portfolio.holds(symbol) else []
+
+
 class Recorder(Strategy):
     """Records what it is shown each session; emits nothing."""
 

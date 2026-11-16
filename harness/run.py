@@ -186,6 +186,42 @@ def load_strategy_class(module_name: str, package: str = "strategies") -> type[S
     if problems:
         raise StrategyLoadError(f"{qualified} is not allowed:\n  " + "\n  ".join(problems))
     module = importlib.import_module(qualified)
+    return _single_strategy_class(module, qualified)
+
+
+def load_strategy_file(path: Path, module_name: str) -> type[Strategy]:
+    """Check, import, and return the single Strategy subclass in the file at `path`,
+    which need not be in `strategies/` (a frozen profile's copy of its strategy).
+
+    The source goes through the same checks as `load_strategy_class`. It is imported
+    under `module_name`, which must be unique to this file's content: an already
+    imported module of that name is reused, not re-read.
+    """
+    if module_name in sys.modules:
+        return _single_strategy_class(sys.modules[module_name], module_name)
+    try:
+        source = path.read_text()
+    except OSError as exc:
+        raise StrategyLoadError(f"cannot read strategy file {path}: {exc}") from exc
+    problems = check_strategy_source(source, str(path))
+    if problems:
+        raise StrategyLoadError(f"{path} is not allowed:\n  " + "\n  ".join(problems))
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise StrategyLoadError(f"cannot import strategy file {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module  # pydantic resolves annotations through it
+    try:
+        # Compiled from the text that was just checked, so a file swapped between the
+        # check and the import cannot run.
+        exec(compile(source, str(path), "exec"), module.__dict__)  # noqa: S102
+    except BaseException:
+        del sys.modules[module_name]
+        raise
+    return _single_strategy_class(module, module_name)
+
+
+def _single_strategy_class(module: Any, qualified: str) -> type[Strategy]:
     classes = [
         obj
         for obj in vars(module).values()

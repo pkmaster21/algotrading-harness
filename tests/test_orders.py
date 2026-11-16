@@ -55,6 +55,8 @@ CFG = ExecutionConfig.model_validate(
         "cash_tolerance": 1.0,
         "max_clock_skew_seconds": 30.0,
         "limits": {"max_order_notional": 5000.0, "max_orders_per_session": 25},
+        "profiles_dir": "/nonexistent/profiles",
+        "state_dir": "/nonexistent/state",
     }
 )
 

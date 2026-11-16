@@ -254,11 +254,13 @@ State on disk (all gitignored):
 ```
 state/paper/KILL                      kill latch, account-wide
 state/paper/active.json               account id, active profile id, cash offset, approval mode
+state/paper/activations.jsonl         every activation, with the profile it replaced
 state/paper/runner.lock               one runner per account
 state/paper/alerts.jsonl
 state/paper/<profile_id>/journal.jsonl   single writer (the runner), fsync per record
 state/paper/<profile_id>/ledger.json     derived snapshot, atomic replace, for readers
 state/paper/<profile_id>/inbox/          control commands from other processes, one file each
+state/paper/<profile_id>/risk_state.json  RiskState the next day starts from (seeded at activation)
 state/paper/<profile_id>/{equity.csv,trades.csv,summary.json}   same schema as backtests
 profiles/<profile_id>/{profile.json,strategy.py}
 ```
@@ -779,7 +781,7 @@ Steps, each journaled, with the kill latch checked between them:
    `OrderManager.recover()`, then continue from the open workflow. The strategy is not
    called again.
 4. Reconcile. `stop`: kill.
-5. Load bars with `loader.load(symbols, paper=PaperAccess(profile_id))`. If the latest
+5. Load bars with `loader.load(symbols, paper=paper_access_for(profile))`. If the latest
    bar of the benchmark symbol is not session t: `skipped_stale_data`, alert, no orders.
    If earlier sessions were missed (calendar gap since the last `day_complete`): alert
    and carry on from the latest close.
@@ -862,9 +864,30 @@ def activate_profile(profile_id: str, approval: Literal["off", "entries"]) -> No
 
 A profile embeds values, not preset names, so editing a preset never changes what is
 trading. Changing anything means a new profile with a new id and a new state folder.
-Profiles are gitignored like strategies, except the plumbing example. A harness commit
+Profiles are gitignored like strategies, the plumbing one included (as built in plan 18:
+a profile holds absolute paths and its creation time, so it is made on the machine that
+trades it, with one `promote_run(..., plumbing=True)` call). A harness commit
 that differs from `harness_git_commit` is a warning in the day report, not a refusal
 (the harness keeps changing during this slice); worth revisiting before live.
+
+As built (plan 18): `profiles_dir` and `state_dir` are settings in `execution.yaml`;
+`paper_access_for(profile)` in `harness/profiles.py` is the one place a `PaperAccess` is
+built; `paper_access_log_problems` lists log lines whose profile does not exist or does
+not verify; a holdout run counts for promotion only if it is also in the holdout log; a
+failed promotion removes its half-written folder. The runner trades the frozen copy
+(`build_profile_strategy` imports `profiles/<id>/strategy.py` through the same import
+checks, via `load_strategy_file` in `run.py`), so `load_profile` verifies the profile
+file and that copy only, and `strategies/<name>.py` is free to change while a profile
+trades. `Venue` gains `verify_account`, and `activate_profile` takes the account from
+it (the same gate the runner uses each morning) and does not judge `shorting_enabled`
+itself. It also refuses while the kill latch is set, when the profile's journal already
+exists (a profile is activated once), when equity and cash differ by more than
+`cash_tolerance`, and when another profile is active unless `replace=True`; every
+activation is appended to `activations.jsonl` with the profile it replaced. It seeds
+`risk_state.json` from the account's equity net of `cash_offset`, and `load_risk_state`
+and `save_risk_state` carry it between days. The restart-equivalence check rebuilds the
+engine for the last 60 in-sample sessions (not every session, which would replay the
+history once per session) and reads in-sample data only.
 
 **Tests:** each refusal; tamper detection (edit one byte of the profile or the strategy);
 activation refuses a non-flat account; the equivalence check passes for the example
@@ -967,8 +990,8 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 15 | `feat(orders): manual approval for entries` | Approval gate, inbox | |
 | 16 | `feat(broker): Alpaca paper adapter` | `alpaca.py`; every **(verify)** item checked against the docs first and recorded in the PR; also verify: client order ids may contain `.` and `-` (symbols such as `BRK.B`), paper fills carry no commission (the order manager books 0), and a repeated client order id returns the existing order even when the new request differs (after an unknown outcome the manager may resend under the same id as a market `day` order where the first was `opg`); the adapter turns Alpaca's rejection of a repeated client order id into a lookup that returns the existing order (the order manager also looks up before believing a rejection that follows a timeout; both layers are deliberate, because this failure is invisible); the open workflow polls with one `open_orders` request every `poll_seconds` and asks about an order by itself only when it has left that list, so `open_orders` must return every open order (check paging and any default limit); the rate limiter must slow a call, never drop it; `VenueOrderState` could carry the order type and time in force so the manager can tell which request the venue holds; the latch blocks `place` only: `cancel`, `cancel_all`, `open_orders` and `get_order` must work while latched, or `kill` can never cancel anything. Tests: latch engaged makes `place` raise without calling the client, and `kill` run while already latched cancels through the adapter's own code path | Credentials, dependencies if alpaca-py needs a bump |
 | 17 | `feat(data): paper access path` | `PaperAccess`, paper access log | Holdout handling |
-| 18 | `feat(profiles): frozen profiles and promotion` | `profiles.py`, restart-equivalence check, plumbing profile; a profile id must match the pattern `PaperAccess` accepts (`<name>-<8 hash characters>`, the name starting with a letter or digit); close the plan 17 stopgap: `PaperAccess` is a label anything that imports `harness.data` can write, so let only the profiles module build one from a verified profile (for example `PaperAccess.for_profile(profile)`, checking the content hash) instead of from a bare string, and add a check that every `profile_id` in the paper access log belongs to a profile that exists (an unknown id there is the record that something read holdout data without a real profile); `RiskState` is seeded from the account's actual equity when a profile starts (not from starting cash) and saved between days | |
-| 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests; the paper day's saved recipe records the whole `ExecutionConfig`, not only `limits`; a `RiskStateError` on a rerun (the mark differs from the first attempt) is reported as "account changed since the first attempt, reconcile first", not as a traceback; the runner checks that the orders it resumes were decided on the session just before today's (the order manager works any open order decided before `session`, and does not know the calendar); the runner builds the `Inbox` for the active profile and passes the approval mode from `active.json`; an order keeps the approval mode it was staged under; `on_session_open` reads the inbox on every pass, and the runner can call `ingest_inbox` at other times; `on_session_open` can be called again after a restart and picks up where the journal says it stopped; it raises `KillSwitchEngaged` after canceling what was open; `set_closes` must be given the close of every held symbol, not only the ones being traded (it refuses otherwise), and the closes are journaled, so a restarted manager does not need them again; the runner builds `PaperAccess` only from a profile that `load_profile` has verified (the test in `tests/test_paper_access.py` allows `PaperAccess(` in `paper.py` and nowhere else in `harness/`), and a `PaperLogError` means no bars and no orders for the day; the runner calls `OrderManager.recover()` first and `set_closes` with the signal session's closes before the engine submits (a missing close fails the submit); a runner that engaged the latch itself keeps it in memory, so after a kill switch reset from another process the runner must be restarted (it exits on a kill anyway; document "after a reset, restart the runner") | |
+| 18 | `feat(profiles): frozen profiles and promotion` | `profiles.py`, restart-equivalence check, plumbing profile; a profile id must match the pattern `PaperAccess` accepts (`<name>-<8 hash characters>`, the name starting with a letter or digit); close the plan 17 stopgap: `PaperAccess` is a label anything that imports `harness.data` can write, so let only the profiles module build one from a verified profile (for example `PaperAccess.for_profile(profile)`, checking the content hash) instead of from a bare string, and add a check that every `profile_id` in the paper access log belongs to a profile that exists (an unknown id there is the record that something read holdout data without a real profile); `RiskState` is seeded from the account's actual equity when a profile starts (not from starting cash) and saved between days. Built: see "As built (plan 18)" in 1.7 | Config boundary (`execution.yaml` gains `profiles_dir` and `state_dir`), holdout handling (`PaperAccess` builder) |
+| 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests; the paper day's saved recipe records the whole `ExecutionConfig`, not only `limits`; a `RiskStateError` on a rerun (the mark differs from the first attempt) is reported as "account changed since the first attempt, reconcile first", not as a traceback; the runner checks that the orders it resumes were decided on the session just before today's (the order manager works any open order decided before `session`, and does not know the calendar); the runner builds the `Inbox` for the active profile and passes the approval mode from `active.json`; an order keeps the approval mode it was staged under; `on_session_open` reads the inbox on every pass, and the runner can call `ingest_inbox` at other times; `on_session_open` can be called again after a restart and picks up where the journal says it stopped; it raises `KillSwitchEngaged` after canceling what was open; `set_closes` must be given the close of every held symbol, not only the ones being traded (it refuses otherwise), and the closes are journaled, so a restarted manager does not need them again; the runner builds its strategy with `build_profile_strategy(profile)` (the frozen copy, never `strategies/<name>.py` or `build_strategy(recipe)`), gets its `PaperAccess` from `paper_access_for(load_profile(...))` (the test in `tests/test_paper_access.py` allows `PaperAccess(` in `profiles.py` and nowhere else in `harness/`), loads the risk state with `load_risk_state` and saves it with `save_risk_state` after the mark, and alerts on anything `paper_access_log_problems` returns; the CLI also exposes `promote_run` and `activate_profile` (activation needs the Alpaca adapter, so it lives with the runner, not in `profiles.py`), and a `PaperLogError` means no bars and no orders for the day; the runner calls `OrderManager.recover()` first and `set_closes` with the signal session's closes before the engine submits (a missing close fails the submit); a runner that engaged the latch itself keeps it in memory, so after a kill switch reset from another process the runner must be restarted (it exits on a kill anyway; document "after a reset, restart the runner") | |
 | 20 | `feat(service): status and control functions` | `service.py`; `ui-design.md` contract update; resetting a drawdown halt journals who reset it, why, and the old peak (the reset erases it from state); adjustments get an `adjustment_id` that names the event (for example `2024-01-04-AAPL-dividend`), so entering one twice is a no-op; `reset_kill_switch` requires a clean reconciliation first (`KillSwitch.reset` only removes the latch), journals what it cleared, and tells the operator to restart the runner; `approve_orders` and `reject_orders` write `ApproveOrders` and `RejectOrders` to the inbox with `Inbox.put` (each approval quotes the `content_hash` from `pending_approvals`), and `list_pending_approvals` needs the pending list written where a reader can get it, since only the runner holds the order manager; other control commands add their own command models to `harness/inbox.py`; test that `flatten` produces only sells of held quantity and works while killed (`OrderManager.send` refuses while the latch is set, so `flatten` needs its own confirmed path past that check; the ledger check that a sell never exceeds the position already applies) | |
 | 21 | `test(paper): end-to-end against the fake venue` | Multi-day buy-and-hold with injected faults; operator runbook | |
 | 22 | End-to-end on the real paper account (run by you) | Checklist below; results recorded in `ARCHITECTURE.md` | Credentials |

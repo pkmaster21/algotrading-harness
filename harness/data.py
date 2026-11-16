@@ -218,6 +218,11 @@ class HoldoutAccess(FrozenModel):
     git_commit: str | None = None
 
 
+# What a frozen profile id looks like: `<name>-<8 hash characters>`. `harness.profiles`
+# builds ids to match it; nothing else should ever need to.
+PROFILE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.]*(-[A-Za-z0-9_.]+)*-[A-Za-z0-9]{8}$"
+
+
 class PaperAccess(FrozenModel):
     """Proof that the caller is paper trading a frozen profile.
 
@@ -227,11 +232,11 @@ class PaperAccess(FrozenModel):
     and each one is logged; paper trading is daily and has its own log, one line per
     profile per day, so the holdout log stays a short list a person reads.
 
-    Only the paper runner builds one, and only from a profile it has loaded and
-    verified. The id must look like a frozen profile's (`<name>-<8 hash characters>`).
+    Only `harness.profiles` builds one (`paper_access_for`), from a profile it has
+    loaded and verified. The id must look like a frozen profile's.
     """
 
-    profile_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.]*(-[A-Za-z0-9_.]+)*-[A-Za-z0-9]{8}$")
+    profile_id: str = Field(pattern=PROFILE_ID_PATTERN)
 
 
 class HoldoutViolation(RuntimeError):
