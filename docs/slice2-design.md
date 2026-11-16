@@ -854,6 +854,42 @@ Also written by the runner: `config_snapshot.yaml` (recipe plus the whole
 `trades.csv` and `summary.json` (with the fill-versus-open columns from 0.2) are split
 out into plan 19b: they need the day's bar, so they describe the day before.
 
+As built (plan 19b): `harness/paper_report.py` builds both files from the journal alone,
+and the runner writes them in step 8 next to `ledger.json` and `equity.csv`. They cover
+sessions through `t` (the equity point of every `decision` record, and fills made on or
+before `t`), so the fills of this morning's open appear in tomorrow's files. The schema
+is a backtest's (`report.trades_from_fills` and `report.summarize` are shared), plus six
+columns in `trades.csv` (`entry_` and `exit_` each with `open`, `seconds_after_open`,
+`slippage_bps`) and a `paper` block in `summary.json` (per side: fills, fills priced,
+slippage in basis points and in dollars, average seconds after the open). A trade row
+is a round trip, not a fill, so a side that filled in pieces is averaged by shares.
+Slippage is positive when the fill was worse than the open (bought above, sold below).
+
+The official opens are not read from the bar cache. The cached bars are adjusted
+(`adjustment: all`), and an adjustment reaches back from its ex-date, so even the bar
+of `t` read on the morning of `t+1` has already moved if a dividend or split goes ex
+that day (a dividend moves it by more than the slippage being measured). So when the
+runner decides, it asks the data source for the unadjusted open of every fill that has
+none on record (`DataLoader.raw_opens`, a new `fetch_raw` on the fetcher, under the
+profile's `PaperAccess` and the paper access log, not cached) and journals them: the
+`decision` record gains `fill_opens` (by session and symbol) and `benchmark_close`. The
+report reads only the journal, so a resumed day rebuilds the same files without asking
+for data. If the opens cannot be fetched, or a symbol had no bar, that is a `report`
+warning, the fill is counted but not priced, and the next decision asks again (an
+unadjusted open does not change, so late is as good). Seconds after the open are the
+venue's timestamp against 09:30:00, negative included.
+
+Differences from a backtest's files: `holdout` is false; the benchmark is the change in
+its journaled closes (no whole shares, no costs, no next-open fill), reported only when
+every session of the equity curve has one (otherwise null, and
+`paper.benchmark_missing` says how many are missing); `events` counts what the
+decisions logged, not what happened to orders at the open; holding days count sessions
+the runner decided on, so a missed session in between is not counted, and a trade
+whose entry or exit fill landed on a session never decided on has none. An operator adjustment that changes a share count is
+not modeled: the report refuses, the runner warns (`report`), and the previous files
+stay. Any journal the report cannot be built from is that same warning, never a failed
+day or a kill.
+
 **Tests:** full days against `FakeVenue` with a fake clock; holiday; stale data; rerun
 after completion; crash and resume at every step; a late start after the OPG cutoff;
 decisions for a day equal a sim backtest's decisions for the same day given the same
@@ -1027,7 +1063,7 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 17 | `feat(data): paper access path` | `PaperAccess`, paper access log | Holdout handling |
 | 18 | `feat(profiles): frozen profiles and promotion` | `profiles.py`, restart-equivalence check, plumbing profile; a profile id must match the pattern `PaperAccess` accepts (`<name>-<8 hash characters>`, the name starting with a letter or digit); close the plan 17 stopgap: `PaperAccess` is a label anything that imports `harness.data` can write, so let only the profiles module build one from a verified profile (for example `PaperAccess.for_profile(profile)`, checking the content hash) instead of from a bare string, and add a check that every `profile_id` in the paper access log belongs to a profile that exists (an unknown id there is the record that something read holdout data without a real profile); `RiskState` is seeded from the account's actual equity when a profile starts (not from starting cash) and saved between days. Built: see "As built (plan 18)" in 1.7 | Config boundary (`execution.yaml` gains `profiles_dir` and `state_dir`), holdout handling (`PaperAccess` builder) |
 | 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests; the paper day's saved recipe records the whole `ExecutionConfig`, not only `limits`; a `RiskStateError` on a rerun (the mark differs from the first attempt) is reported as "account changed since the first attempt, reconcile first", not as a traceback; the runner checks that the orders it resumes were decided on the session just before today's (the order manager works any open order decided before `session`, and does not know the calendar); the runner builds the `Inbox` for the active profile and passes the approval mode from `active.json`; an order keeps the approval mode it was staged under; `on_session_open` reads the inbox on every pass, and the runner can call `ingest_inbox` at other times; `on_session_open` can be called again after a restart and picks up where the journal says it stopped; it raises `KillSwitchEngaged` after canceling what was open; `set_closes` must be given the close of every held symbol, not only the ones being traded (it refuses otherwise), and the closes are journaled, so a restarted manager does not need them again; the runner builds its strategy with `build_profile_strategy(profile)` (the frozen copy, never `strategies/<name>.py` or `build_strategy(recipe)`), gets its `PaperAccess` from `paper_access_for(load_profile(...))` (the test in `tests/test_paper_access.py` allows `PaperAccess(` in `profiles.py` and nowhere else in `harness/`), loads the risk state with `load_risk_state` and saves it with `save_risk_state` after the mark, and alerts on anything `paper_access_log_problems` returns; the CLI also exposes `promote_run` and `activate_profile` (activation needs the Alpaca adapter, so it lives with the runner, not in `profiles.py`), and a `PaperLogError` means no bars and no orders for the day; the runner calls `OrderManager.recover()` first and `set_closes` with the signal session's closes before the engine submits (a missing close fails the submit); a runner that engaged the latch itself keeps it in memory, so after a kill switch reset from another process the runner must be restarted (it exits on a kill anyway; document "after a reset, restart the runner"). Built: see "As built (plan 19)" in 1.6 | |
-| 19b | `feat(paper): trades and summary from the journal` | Split from 19 to keep it reviewable: `trades.csv` and `summary.json` in the profile's state folder, same schema as backtests, built from the journal's fills and `decision` records for sessions whose bar exists (through `t`), plus per fill the official open, seconds after the open, and slippage in basis points against it (0.2) | |
+| 19b | `feat(paper): trades and summary from the journal` | Split from 19 to keep it reviewable: `trades.csv` and `summary.json` in the profile's state folder, same schema as backtests, built from the journal's fills and `decision` records for sessions whose bar exists (through `t`), plus per fill the official open, seconds after the open, and slippage in basis points against it (0.2). Built: see "As built (plan 19b)" in 1.6 | Journal schema (the `decision` record gains `fill_opens` and `benchmark_close`); `report.py` (slice 1) gains `trades_from_fills`, which `round_trips` now calls; holdout handling (`DataLoader.raw_opens`, a second read past the cutoff under `PaperAccess`, and `fetch_raw` on the fetcher protocol) |
 | 20 | `feat(service): status and control functions` | `service.py`; `ui-design.md` contract update; `activate_profile` here takes `runner.lock` as the CLI does (`_runner_lock` in `paper.py`), so the active profile cannot change under a running day; resetting a drawdown halt journals who reset it, why, and the old peak (the reset erases it from state); adjustments get an `adjustment_id` that names the event (for example `2024-01-04-AAPL-dividend`), so entering one twice is a no-op; `reset_kill_switch` requires a clean reconciliation first (`KillSwitch.reset` only removes the latch), journals what it cleared, and tells the operator to restart the runner; `approve_orders` and `reject_orders` write `ApproveOrders` and `RejectOrders` to the inbox with `Inbox.put` (each approval quotes the `content_hash` from `pending_approvals`), and `list_pending_approvals` reads `pending_approvals.json` in the profile's state folder, which the runner writes after the decision and again when the day ends (only the runner holds the order manager); other control commands add their own command models to `harness/inbox.py`; test that `flatten` produces only sells of held quantity and works while killed (`OrderManager.send` refuses while the latch is set, so `flatten` needs its own confirmed path past that check; the ledger check that a sell never exceeds the position already applies) | |
 | 21 | `test(paper): end-to-end against the fake venue` | Multi-day buy-and-hold with injected faults; operator runbook | |
 | 22 | End-to-end on the real paper account (run by you) | Checklist below; results recorded in `ARCHITECTURE.md` | Credentials |

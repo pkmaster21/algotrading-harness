@@ -12,7 +12,7 @@ import csv
 import datetime as dt
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +99,24 @@ class _OpenTrade:
 
 
 def round_trips(result: BacktestResult) -> list[dict[str, Any]]:
+    """The trades of a backtest: `trades_from_fills` over everything the run filled."""
+    return trades_from_fills(
+        result.fills,
+        [p.date for p in result.equity],
+        {s: p.quantity for s, p in result.final_positions.items()},
+        result.final_marks,
+        result.equity[-1].date if result.equity else result.end,
+    )
+
+
+def trades_from_fills(
+    fills: Sequence[Fill],
+    sessions: Sequence[dt.date],
+    final_quantities: Mapping[str, int],
+    final_marks: Mapping[str, float],
+    last_date: dt.date,
+    extra: Callable[[Sequence[Fill], Sequence[Fill]], Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """One trade per position, from the first entry fill until the position is flat.
 
     An order can fill in several pieces, and an exit can take more than one order (a
@@ -108,14 +126,18 @@ def round_trips(result: BacktestResult) -> list[dict[str, Any]]:
     an error, because the harness never adds to a position.
 
     Positions still open at the end are reported with is_open=True: the shares left are
-    marked at their last close with no exit cost, and averaged with any shares already
-    sold. Holding days count trading sessions from the first entry fill to the fill that
-    closed the position (or to the last session for open trades).
+    marked at their last close (`final_marks`) with no exit cost, and averaged with any
+    shares already sold. They must be the positions in `final_quantities`. Holding days
+    count the `sessions` from the first entry fill to the fill that closed the position
+    (or to `last_date` for open trades).
+
+    `extra`, given a trade's buy fills and sell fills, returns more columns for its row
+    (paper trading adds how each side filled against the official open).
     """
-    session_index = {p.date: i for i, p in enumerate(result.equity)}
+    session_index = {d: i for i, d in enumerate(sessions)}
     open_trades: dict[str, _OpenTrade] = {}
     trades: list[dict[str, Any]] = []
-    for fill in result.fills:
+    for fill in fills:
         symbol = fill.instrument.key
         trade = open_trades.get(symbol)
         if fill.side == "buy":
@@ -139,26 +161,29 @@ def round_trips(result: BacktestResult) -> list[dict[str, Any]]:
                     mark=None,
                     exit_reason="no_data" if fill.kind == "forced_close" else "signal",
                     session_index=session_index,
+                    extra=extra,
                 )
             )
 
-    last_date = result.equity[-1].date if result.equity else result.end
     for symbol, trade in open_trades.items():
-        position = result.final_positions.get(symbol)
-        if position is None:
+        held = final_quantities.get(symbol)
+        if held is None:
             raise ReportError(f"{symbol} is open in fills but not in final positions")
-        if position.quantity != trade.remaining:
+        if held != trade.remaining:
             raise ReportError(
                 f"{symbol}: fills leave {trade.remaining} shares but the final position "
-                f"holds {position.quantity}"
+                f"holds {held}"
             )
+        if symbol not in final_marks:
+            raise ReportError(f"{symbol} is still held but has no close to mark it at")
         trades.append(
             _trade(
                 trade,
                 exit_date=last_date,
-                mark=result.final_marks[symbol],
+                mark=final_marks[symbol],
                 exit_reason="open",
                 session_index=session_index,
+                extra=extra,
             )
         )
     trades.sort(key=lambda t: (t["entry_date"], t["symbol"]))
@@ -188,6 +213,7 @@ def _trade(
     mark: float | None,
     exit_reason: str,
     session_index: Mapping[dt.date, int],
+    extra: Callable[[Sequence[Fill], Sequence[Fill]], Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
     """Build one trades.csv row. `mark` values the shares not yet sold (open trades)."""
     buys, sells = trade.buys, trade.sells
@@ -213,6 +239,7 @@ def _trade(
         "holding_days": end_i - start_i if start_i is not None and end_i is not None else None,
         "exit_reason": exit_reason,
         "is_open": exit_reason == "open",
+        **(extra(buys, sells) if extra is not None else {}),
     }
 
 
@@ -247,6 +274,8 @@ def summarize(
     holdout: bool,
     trades: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # `harness.paper_report` calls this with `trades` and a result that has no `updates`
+    # and no `final_positions`. Anything read from those here must be given to it too.
     trades = round_trips(result) if trades is None else trades
     closed = [t for t in trades if not t["is_open"]]
     wins = [t for t in closed if t["pnl"] > 0]
