@@ -17,7 +17,7 @@ import harness.control as control
 import harness.service as service
 from harness.broker.venue import KillSwitchEngaged, VenueDataError, VenueOrder
 from harness.control import ControlError
-from harness.killswitch import KillSwitch, kill
+from harness.killswitch import KillState, KillSwitch, KillSwitchError, kill
 from harness.orders import OrderManagerError, SessionIncomplete
 from harness.positions import LedgerAdjustment
 from harness.profiles import load_risk_state, save_risk_state
@@ -61,6 +61,18 @@ def runner_running(rig: Rig) -> Iterator[None]:
         yield
     finally:
         os.close(fd)
+
+
+def latch_unwritable(monkeypatch: Any) -> None:
+    """A disk that takes no latch: `engage` latches this process in memory, makes no
+    file and raises, as the real one does, and the cancel note is not written either."""
+
+    def engage(self: KillSwitch, reason: str, source: str) -> KillState:
+        self._latched = KillState(engaged=True, at=self._now(), reason=reason, source=source)
+        raise KillSwitchError("could not write the kill latch: disk full")
+
+    monkeypatch.setattr(KillSwitch, "engage", engage)
+    monkeypatch.setattr(KillSwitch, "confirm_cancel", lambda self: self.state())
 
 
 def holding_spy(tmp_path: Path) -> tuple[Rig, int]:
@@ -424,6 +436,20 @@ def test_engaging_cancels_on_an_account_that_fails_the_setup_check(
     made = rig.venue.calls[before:]
     assert ("cancel_all", "") in made and ("verify_account", "") not in made
     assert [(a.severity, a.kind) for a in rig.alerts.alerts] == [("critical", "kill_switch")]
+
+
+def test_a_kill_by_the_runner_with_no_latch_on_disk_says_the_next_run_is_not_stopped(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    rig, _ = holding_spy(tmp_path)
+    rig.morning(D2)
+    rig.venue.hold("AAPL", 1, 50.0)  # reconciliation stops the day
+    latch_unwritable(monkeypatch)
+    report = rig.run()
+    assert report.outcome == "killed" and not rig.kill_switch().engaged()
+    (alert,) = report.alerts
+    assert (alert.severity, alert.kind) == ("critical", "kill_switch")
+    assert "THE LATCH IS NOT ON DISK, so the next run will NOT be refused" in alert.message
 
 
 def test_reset_needs_a_clean_reconciliation(tmp_path: Path) -> None:

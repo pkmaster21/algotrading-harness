@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from pydantic import AwareDatetime, ValidationError
+from pydantic import AwareDatetime, Field, ValidationError
 
 from harness.alerts import Alert, Alerter, send_alert
 from harness.broker.venue import KillSwitchEngaged, Venue
@@ -44,6 +44,10 @@ class KillState(FrozenModel):
     reason: str = ""
     source: str = ""  # "operator:cli", "auto:reconcile", ...
     cancel_confirmed: bool = False
+    # False only on what `kill` returns when no latch is on disk afterwards: this
+    # process is stopped, but another process, or the next run, is not. Not part of the
+    # latch file.
+    latch_written: bool = Field(default=True, exclude=True)
 
 
 def _utc_now() -> dt.datetime:
@@ -248,6 +252,10 @@ def kill(
     Never raises: every failure ends in a critical alert and a returned state whose
     `cancel_confirmed` is False. If the cancel cannot be confirmed, the latch stays set
     and the alert says so. Positions are never touched.
+
+    If no latch is on disk afterwards (it could not be written), the returned state
+    has `latch_written` False and the alert says so: this process is stopped, but
+    nothing stops the next one. A caller that reports to an operator must pass that on.
     """
     problems: list[str] = []
     try:
@@ -288,6 +296,14 @@ def kill(
                 state = state.model_copy(update={"cancel_confirmed": True})
         else:
             problems.append(f"open orders are NOT confirmed canceled: {last}")
+
+    # Looked at with a fresh object: what any other process, and the next run, will see.
+    if not KillSwitch(switch.path).engaged():
+        state = state.model_copy(update={"latch_written": False})
+        problems.append(
+            "THE LATCH IS NOT ON DISK, so the next run will NOT be refused. Do not start "
+            "the runner; make the latch writable and engage the kill switch again"
+        )
 
     message = f"kill switch engaged by {source}: {reason}."
     if state.reason != reason or state.source != source:

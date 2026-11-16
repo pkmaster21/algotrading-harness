@@ -12,7 +12,14 @@ import harness.cli as cli
 import harness.service as service
 from harness.profiles import save_risk_state
 from harness.risk import RiskState
-from tests.test_control import ME, _stamp, controls, holding_spy, runner_running
+from tests.test_control import (
+    ME,
+    _stamp,
+    controls,
+    holding_spy,
+    latch_unwritable,
+    runner_running,
+)
 from tests.test_paper import D1, Rig, T
 
 Capture = pytest.CaptureFixture[str]
@@ -149,6 +156,18 @@ def test_a_kill_that_cannot_confirm_the_cancel_exits_1(tmp_path: Path, capsys: C
     assert "no profile is active, so no venue was asked to cancel" in capsys.readouterr().out
     assert rig.kill_switch().engaged()
     assert run(rig, *op("reset-kill", "--confirm", "none")) == 0
+
+
+def test_a_kill_whose_latch_was_not_written_exits_1_and_says_so(
+    tmp_path: Path, capsys: Capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig, _ = holding_spy(tmp_path)
+    latch_unwritable(monkeypatch)
+    assert run(rig, *op("kill", "--reason", "testing")) == 1  # although the cancel is confirmed
+    out = capsys.readouterr().out
+    assert "THE LATCH FILE WAS NOT WRITTEN, so nothing stops the next run" in out
+    assert "Open orders were canceled" in out and "Do not start the runner" in out
+    assert not rig.kill_switch().engaged()  # the truth `status` shows
 
 
 # --------------------------------------------------------------------------- approvals
