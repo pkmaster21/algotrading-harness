@@ -37,7 +37,7 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models | 1 |
 | `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff | 1 |
 | `harness/ratelimit.py` | Request rate limiter shared by the data loader and the venue adapter | 2 |
-| `harness/orders.py` | Order manager core: staging, deterministic order ids, duplicate-free submission (write-ahead journal, lookup before resend), venue states into ledger fills, cancel with confirmation, recovery after a restart. The timed open workflow comes on top | 2 |
+| `harness/orders.py` | Order manager core: staging, deterministic order ids, duplicate-free submission (write-ahead journal, lookup before resend), venue states into ledger fills, cancel with confirmation, recovery after a restart. Implements `Broker` for paper trading: `on_session_open` runs the open (auction exits, entries released against the actual account after the open, deadlines) | 2 |
 | `harness/killswitch.py` | Kill latch file (fails closed, any process can set it) and `kill`, which sets it, then cancels open orders and confirms. Never sells | 2 |
 | `harness/alerts.py` | `Alert`, the `Alerter` protocol, and the log and `alerts.jsonl` sinks. A sink never raises | 2 |
 | `harness/keys.py` | Read API keys from `.env` into a redacted local object; never touches the environment | 2 |
@@ -330,6 +330,11 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   of the account; then equity changes need to be net of cash flows. The ledger has the
   same gap: a `LedgerAdjustment` that adds shares with a cost basis and no cash (a
   transfer-in) is booked as a realized gain equal to the cost basis.
+- A paper run that starts after `session_deadline` sends nothing: staged exits are closed
+  as `session_deadline` with a critical alert, and the positions are kept another day.
+  That is the right failure for entries. For exits, sending them late as market orders
+  would reduce risk sooner. Kept as built for paper, where a late start is something to
+  investigate; decide before live.
 - Venue fees in live trading. The order manager books every venue fill with a commission
   of 0, which is right for paper. Live, Alpaca passes on small regulatory fees on sells
   (about 14 cents on a $5,000 sale). Reconciliation compares the total cash difference,

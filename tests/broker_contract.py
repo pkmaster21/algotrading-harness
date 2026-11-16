@@ -48,6 +48,13 @@ class BrokerRig(ABC):
         says otherwise.
         """
 
+    def split_fill(self, symbol: str, first: int, *, rest_fills: bool) -> bool:
+        """Arrange for the next order in `symbol` to fill `first` shares, and then the
+        rest in a second piece (`rest_fills`) or not at all. Returns False if this
+        broker always fills an order in one piece, which skips the tests that need it.
+        """
+        return False
+
 
 RigFactory = Callable[[float], BrokerRig]  # starting cash -> a fresh rig
 
@@ -223,6 +230,40 @@ class BrokerContract:
             return ids, updates, rig.broker.account()
 
         assert run() == run()
+
+    def test_order_filled_in_pieces_reports_each_piece_once(self, make_rig: RigFactory) -> None:
+        rig = make_rig(CASH)
+        placed = order("AAPL", "buy", 5)
+        (order_id,) = rig.broker.submit([placed])
+        if not rig.split_fill("AAPL", 2, rest_fills=True):
+            pytest.skip("this broker fills an order in one piece")
+        updates = [u for u in settle(rig, D1, {"AAPL": 100.0}, {order_id: placed})]
+        assert [u.status for u in updates] == ["partially_filled", "filled"]
+        # Fills are incremental: each update carries only what is new.
+        assert [sum(f.quantity for f in u.fills) for u in updates] == [2, 3]
+        position = rig.broker.account().positions["AAPL"]
+        assert (position.quantity, position.entry_date, position.entry_order_id) == (
+            5,
+            D1,
+            order_id,
+        )
+
+    def test_order_left_partly_filled_ends_without_more_fills(self, make_rig: RigFactory) -> None:
+        rig = make_rig(CASH)
+        placed = order("AAPL", "buy", 5)
+        (order_id,) = rig.broker.submit([placed])
+        if not rig.split_fill("AAPL", 2, rest_fills=False):
+            pytest.skip("this broker fills an order in one piece")
+        updates = settle(rig, D1, {"AAPL": 100.0}, {order_id: placed})
+        assert [u.status for u in updates][:1] == ["partially_filled"]
+        assert final_status(updates, order_id) in TERMINAL - {"filled"}
+        assert updates[-1].fills == ()
+        assert filled_quantity(updates, order_id) == 2
+        assert rig.broker.account().positions["AAPL"].quantity == 2
+        # A day order: the unfilled part is gone, not waiting for the next session.
+        settled = rig.broker.account()
+        assert settle(rig, D2, {"AAPL": 100.0}, {order_id: placed}) == []
+        assert rig.broker.account() == settled
 
     # -------------------------------------------------------------- cash and positions
 

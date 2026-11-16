@@ -3,7 +3,7 @@
 This module is the core: staging, order ids, the submission protocol, turning venue
 states into ledger fills, cancel with confirmation, and recovery after a restart. The
 timed open workflow (when exits and entries are sent, deadlines) is built on these
-operations and is not here.
+operations: `on_session_open`, at the bottom of the class.
 
 How a duplicate order is made impossible:
 
@@ -45,6 +45,7 @@ from typing import Literal, NoReturn
 from pydantic import JsonValue, ValidationError
 
 from harness.alerts import Alert, Alerter, Severity, send_alert
+from harness.broker.base import Broker, LookAheadError
 from harness.broker.venue import (
     KillSwitchEngaged,
     TimeInForce,
@@ -55,7 +56,7 @@ from harness.broker.venue import (
     VenueRejected,
     VenueStatus,
 )
-from harness.config import ExecutionConfig
+from harness.config import MARKET_OPEN, ExecutionConfig
 from harness.journal import Journal
 from harness.killswitch import KillSwitch, kill
 from harness.models import (
@@ -70,6 +71,7 @@ from harness.models import (
     Stock,
 )
 from harness.positions import Ledger, LedgerError
+from harness.risk import RiskDecision, RiskManager
 
 # "staged": journaled, nothing sent yet. "idle": an attempt ended with shares still
 # unfilled and nothing is at the venue; the caller sends again or closes the order.
@@ -98,7 +100,8 @@ class WorkingOrder(FrozenModel):
     """Order-manager state for one order. Rebuilt from the journal after a restart."""
 
     order_id: str  # deterministic; what the engine sees
-    order: Order
+    order: Order  # as submitted
+    quantity: int  # what is being worked: less than the order's if it was cut at release
     reference_price: float  # the close the order was decided on
     phase: OrderPhase
     venue_orders: tuple[VenueOrder, ...]  # attempts, oldest first; at most one not final
@@ -151,6 +154,11 @@ class _Tracked:
     phase: OrderPhase = "staged"
     reason: OrderUpdateReason = ""
     attempts: list[_Attempt] = field(default_factory=list)
+    quantity: int = 0  # shares being worked; the order's own quantity unless cut at release
+    fill_reason: OrderUpdateReason = ""  # reported with the final fill of a cut order
+
+    def __post_init__(self) -> None:
+        self.quantity = self.quantity or self.order.quantity
 
     @property
     def side(self) -> Side:
@@ -162,16 +170,17 @@ class _Tracked:
 
     @property
     def remaining(self) -> int:
-        return self.order.quantity - self.filled
+        return self.quantity - self.filled
 
     @property
     def last(self) -> _Attempt | None:
         return self.attempts[-1] if self.attempts else None
 
 
-class OrderManager:
-    """Stages orders, sends them without duplicates, and keeps the ledger in step with
-    the venue. Call `recover()` once after construction, before anything else."""
+class OrderManager(Broker):
+    """The engine-facing Broker for paper trading. Stages orders, sends them without
+    duplicates, and keeps the ledger in step with the venue. Call `recover()` once after
+    construction, before anything else."""
 
     def __init__(
         self,
@@ -182,6 +191,8 @@ class OrderManager:
         alerts: Alerter | None,
         cfg: ExecutionConfig,
         profile_id: str,
+        risk: RiskManager,
+        max_positions: int,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], dt.datetime] = _utc_now,
     ) -> None:
@@ -193,6 +204,9 @@ class OrderManager:
         self._alerts = alerts
         self._cfg = cfg
         self._profile_id = profile_id
+        self._risk = risk
+        self._max_positions = max_positions
+        self._clock_offset = dt.timedelta(0)  # venue clock minus local clock
         self._sleep = sleep
         self._now = now
         self._orders: dict[str, _Tracked] = {}  # in staging order
@@ -205,11 +219,23 @@ class OrderManager:
     # ------------------------------------------------------------------ staging
 
     def set_closes(self, closes: Mapping[str, float]) -> None:
-        """The closes the next submitted orders were decided on, by symbol. Each staged
-        order records its symbol's close as the reference price of its fills."""
+        """The closes of the signal session, by symbol. Each order staged afterwards
+        records its symbol's close as the reference price of its fills, and held
+        positions are valued at these closes when an entry is released.
+
+        They must cover every symbol the ledger holds, or no entry could be judged at
+        release. Journaled, so a restarted manager has them without being told again.
+        """
+        self._require_recovered()
         for symbol, close in closes.items():
             if not (math.isfinite(close) and close > 0):
                 raise OrderManagerError(f"close for {symbol} must be a positive number")
+        missing = sorted(s for s in self._ledger.account().positions if s not in closes)
+        if missing:
+            raise OrderManagerError(f"no close for held symbols: {', '.join(missing)}")
+        if dict(closes) == self._closes:
+            return  # the same closes again (a rerun after a restart): nothing new to record
+        self._journal.append("closes", {"closes": dict(closes)})
         self._closes = dict(closes)
 
     def submit(self, orders: Sequence[Order]) -> list[str]:
@@ -416,16 +442,31 @@ class OrderManager:
 
     def refresh(self) -> None:
         """Read the venue's state of every order that is, or may be, at the venue, and
-        record new fills. A venue that does not answer changes nothing."""
+        record new fills. A venue that does not answer changes nothing.
+
+        One request lists every order still open at the venue. Only an order that is
+        not in that list (it just ended, or it is not visible yet) is asked about by
+        itself, so a quiet poll costs one request however many orders are working.
+        """
         self._require_recovered()
-        for tracked in list(self._orders.values()):
-            attempt = tracked.last
-            if attempt is None or tracked.phase not in ("working", "unknown", "submitting"):
-                continue
-            try:
-                state = self._venue.get_order(attempt.venue_order.client_order_id)
-            except Exception:
-                continue
+        watched = [
+            (t, t.last)
+            for t in self._orders.values()
+            if t.last is not None and t.phase in ("working", "unknown", "submitting")
+        ]
+        if not watched:
+            return
+        try:
+            listed = {s.client_order_id: s for s in self._venue.open_orders()}
+        except Exception:
+            listed = {}  # fall back to asking about each order
+        for tracked, attempt in watched:
+            state = listed.get(attempt.venue_order.client_order_id)
+            if state is None:
+                try:
+                    state = self._venue.get_order(attempt.venue_order.client_order_id)
+                except Exception:
+                    continue
             if state is not None:
                 self._observe(tracked, attempt, state)
             elif attempt.state == "open":
@@ -505,7 +546,7 @@ class OrderManager:
         """Set the order's phase from its last attempt, and report."""
         if tracked.remaining == 0:
             attempt.state = "final"
-            self._close(tracked, "filled", "", fills)
+            self._close(tracked, "filled", tracked.fill_reason, fills)
             return
         if fills:
             self._updates.append(
@@ -545,12 +586,28 @@ class OrderManager:
         SessionIncomplete if the venue does not confirm within `cancel_confirm_seconds`.
         """
         self._require_recovered()
+        return self._pull(list(self._orders.values()), lambda tracked: reason)
+
+    def _pull(
+        self,
+        targets: Sequence[_Tracked],
+        reason_for: Callable[[_Tracked], OrderUpdateReason] | None,
+    ) -> list[str]:
+        """Take `targets` off the venue and confirm it. With `reason_for`, an order left
+        unfilled is closed as canceled with that reason, and the ids of those orders
+        are returned. Without it, the order is left `idle` (or `staged`) to be sent
+        again."""
         canceled: list[str] = []
         pending: list[_Tracked] = []
-        for tracked in self._orders.values():
-            if tracked.phase in ("staged", "idle"):
-                self._close(tracked, "canceled", reason)
+
+        def finish(tracked: _Tracked) -> None:
+            if reason_for is not None and tracked.phase in ("staged", "idle"):
+                self._close(tracked, "canceled", reason_for(tracked))
                 canceled.append(tracked.order_id)
+
+        for tracked in targets:
+            if tracked.phase in ("staged", "idle"):
+                finish(tracked)
             elif tracked.phase not in TERMINAL_PHASES:
                 pending.append(tracked)
 
@@ -560,11 +617,10 @@ class OrderManager:
             for tracked in pending:
                 attempt = tracked.last
                 assert attempt is not None  # working, unknown and submitting have one
-                if not self._cancel_one(tracked, attempt, waited):
+                if self._cancel_one(tracked, attempt, waited):
+                    finish(tracked)  # staged here means it never reached the venue
+                else:
                     still.append(tracked)
-                elif tracked.phase in ("idle", "staged"):  # staged: never reached the venue
-                    self._close(tracked, "canceled", reason)
-                    canceled.append(tracked.order_id)
             pending = still
             if not pending:
                 break
@@ -643,6 +699,21 @@ class OrderManager:
                     reference = payload["reference_price"]
                     assert isinstance(reference, int | float)
                     self._orders[order_id] = _Tracked(order_id, order, float(reference))
+                elif record.kind == "closes":
+                    closes = payload["closes"]
+                    assert isinstance(closes, dict)
+                    self._closes = {
+                        symbol: float(close)
+                        for symbol, close in closes.items()
+                        if isinstance(close, int | float)
+                    }
+                    assert len(self._closes) == len(closes)
+                elif record.kind == "order_reduced":
+                    tracked = self._orders[str(payload["order_id"])]
+                    quantity = payload["quantity"]
+                    assert isinstance(quantity, int) and 0 < quantity < tracked.quantity
+                    tracked.quantity = quantity
+                    tracked.fill_reason = _reduced_reason(str(payload["rule"]))
                 elif record.kind == "order_intent":
                     tracked = self._orders[str(payload["order_id"])]
                     number, before = payload["attempt"], payload["filled_before"]
@@ -739,12 +810,216 @@ class OrderManager:
         )
         return None
 
+    # ------------------------------------------------------------------ the open workflow
+
+    def on_session_open(self, session: dt.date, opens: Mapping[str, float]) -> None:
+        """Work every open order to a final state, in `session`. Blocks until all are
+        final or `session_deadline` passes. Ignores `opens`: real fills come from the
+        venue.
+
+        1. Exits go into the opening auction (market, `opg`) until `opg_cutoff`; later
+           ones go as market `day` orders. Whatever an auction order leaves unfilled is
+           sent again as a market `day` order, and an auction order still working at
+           `exit_deadline` is canceled and sent that way too.
+        2. Entries wait for the open, and for every exit to be final or `exit_deadline`.
+           Each is then checked against the actual account (`RiskManager.review_release`),
+           cut or refused if it no longer fits, and sent as a limit `day` order capped
+           at its close times `1 + entry_limit_pct`. Entries are never sent twice.
+        3. At `session_deadline` whatever is still working is canceled and confirmed.
+
+        Safe to call again after a restart (and `recover()`): each step looks at what
+        the order's phase says is left to do. Raises KillSwitchEngaged, after canceling
+        what is open, if the latch is set; SessionIncomplete as elsewhere; and
+        LookAheadError, doing nothing, for an order decided in `session` or later.
+        """
+        self._require_recovered()
+        live = [t for t in self._orders.values() if t.phase not in TERMINAL_PHASES]
+        if not live:
+            return
+        for tracked in live:
+            if tracked.order.created_on >= session:
+                raise LookAheadError(
+                    f"order {tracked.order_id} was decided on {tracked.order.created_on}; "
+                    f"it cannot be worked in session {session}"
+                )
+        self._sync_clock()
+        today = self._time().astimezone(MARKET_TZ).date()
+        if today != session:
+            raise OrderManagerError(f"session {session} is not today ({today} in New York)")
+        try:
+            self._work_session(session, live)
+        except KillSwitchEngaged:
+            self._pull(live, lambda tracked: "kill_switch")
+            raise
+
+    def _work_session(self, session: dt.date, live: Sequence[_Tracked]) -> None:
+        def at(time_of_day: dt.time) -> dt.datetime:
+            return dt.datetime.combine(session, time_of_day, MARKET_TZ)
+
+        cfg = self._cfg
+        open_at, deadline = at(MARKET_OPEN), at(cfg.session_deadline)
+        opg_cutoff, exit_deadline = at(cfg.opg_cutoff), at(cfg.exit_deadline)
+        exits = [t for t in live if t.side == "sell"]
+        entries = [t for t in live if t.side == "buy"]  # staging order is rank order
+        sends: dict[str, int] = {}  # exit order id -> sends this session
+
+        while True:
+            self._kill.check()
+            now = self._time()
+            if now >= deadline:
+                break
+            if now >= open_at:
+                self.refresh()
+            for tracked in exits:
+                self._work_exit(tracked, session, sends, now < opg_cutoff, now >= exit_deadline)
+            exits_final = all(t.phase in TERMINAL_PHASES for t in exits)
+            if now >= open_at and (exits_final or now >= exit_deadline):
+                for tracked in entries:
+                    self._work_entry(tracked, session)
+            if all(t.phase in TERMINAL_PHASES for t in live):
+                break
+            upcoming = min(b for b in (open_at, exit_deadline, deadline) if b > now)
+            self._sleep(max(min(cfg.poll_seconds, (upcoming - now).total_seconds()), 0.001))
+
+        def reason(tracked: _Tracked) -> OrderUpdateReason:
+            if tracked.side == "sell":
+                return "session_deadline"
+            last = tracked.last
+            if last is not None and last.state == "void" and last.maybe_sent:
+                return "unknown_outcome"  # a send got no answer and the order never showed up
+            sent = any(a.state != "void" for a in tracked.attempts)
+            return "limit_not_reached" if sent else "session_deadline"
+
+        self._pull(live, reason)
+        for tracked in exits:
+            if tracked.phase in ("canceled", "expired"):
+                self._alert(
+                    "critical",
+                    "exit_unfilled",
+                    f"exit {tracked.order_id} ended {tracked.phase} with {tracked.remaining} "
+                    f"of {tracked.quantity} shares unsold; the position remains",
+                )
+
+    def _work_exit(
+        self,
+        tracked: _Tracked,
+        session: dt.date,
+        sends: dict[str, int],
+        auction_open: bool,
+        past_exit_deadline: bool,
+    ) -> None:
+        attempt = tracked.last
+        if (
+            tracked.phase == "working"
+            and past_exit_deadline
+            and attempt is not None
+            and attempt.venue_order.time_in_force == "opg"
+        ):
+            self._pull([tracked], None)  # the auction order is taken back; the rest goes below
+        if tracked.phase not in ("staged", "idle", "unknown"):
+            return
+        # The first send, plus a bounded number of further ones: an exit keeps trying,
+        # but a venue that ends every attempt must not turn into a loop.
+        if sends.get(tracked.order_id, 0) > self._cfg.max_submit_attempts:
+            return
+        sends[tracked.order_id] = sends.get(tracked.order_id, 0) + 1
+        self.send(
+            tracked.order_id,
+            session,
+            type="market",
+            time_in_force="opg" if auction_open else "day",
+        )
+
+    def _work_entry(self, tracked: _Tracked, session: dt.date) -> None:
+        if tracked.phase == "idle":  # the venue ended it early; entries are not sent twice
+            self._close(tracked, "canceled", "limit_not_reached")
+            return
+        if tracked.phase != "staged":
+            return
+        if tracked.order.created_on in self._blocked:
+            self._close(tracked, "canceled", "unknown_outcome")
+            return
+        limit = entry_limit_price(tracked.reference_price, self._cfg.entry_limit_pct)
+        if limit is None:
+            self._refuse(tracked, f"no limit price from a close of {tracked.reference_price}")
+            return
+        working = [
+            t
+            for t in self._orders.values()
+            if t.side == "buy" and t.phase in ("working", "unknown", "submitting") and t.last
+        ]
+        reserved = sum(
+            t.remaining * (t.last.venue_order.limit_price or 0.0) for t in working if t.last
+        )
+        order = tracked.order
+        if tracked.quantity != order.quantity:
+            order = order.model_copy(update={"quantity": tracked.quantity})
+        decision = self._risk.review_release(
+            order,
+            self._ledger.account(),
+            self._closes,
+            price=limit,
+            reserved_cash=reserved,
+            pending_entries=sum(1 for t in working if t.filled == 0),
+            max_positions=self._max_positions,
+        )
+        if decision.approved_quantity == 0:
+            if decision.rule == "no_leverage":
+                self._close(tracked, "canceled", "insufficient_cash")
+            else:
+                self._refuse(tracked, f"{decision.rule}: {decision.detail}")
+            return
+        if decision.approved_quantity < tracked.quantity:
+            self._reduce(tracked, decision)
+        self.send(tracked.order_id, session, type="limit", time_in_force="day", limit_price=limit)
+
+    def _refuse(self, tracked: _Tracked, why: str) -> None:
+        self._alert("warn", "entry_refused", f"entry {tracked.order_id} not sent: {why}")
+        self._close(tracked, "rejected", "risk_rejected")
+
+    def _reduce(self, tracked: _Tracked, decision: RiskDecision) -> None:
+        """Cut the quantity being worked, on the record, before the cut order is sent."""
+        self._journal.append(
+            "order_reduced",
+            {
+                "order_id": tracked.order_id,
+                "quantity": decision.approved_quantity,
+                "rule": decision.rule,
+                "detail": decision.detail,
+            },
+        )
+        tracked.quantity = decision.approved_quantity
+        tracked.fill_reason = _reduced_reason(str(decision.rule))
+
+    def _sync_clock(self) -> None:
+        """Measure the local clock against the venue's. All deadlines use the venue's
+        time; a local clock too far from it stops trading."""
+        for tried in range(self._cfg.max_submit_attempts):
+            if tried:
+                self._sleep(self._cfg.poll_seconds)
+            try:
+                offset = self._venue.now() - self._now()
+            except Exception:
+                continue
+            if abs(offset.total_seconds()) > self._cfg.max_clock_skew_seconds:
+                self._violation(
+                    f"clock skew: the venue's clock is {offset.total_seconds():+.0f} seconds "
+                    f"from the local clock (limit {self._cfg.max_clock_skew_seconds:.0f})"
+                )
+            self._clock_offset = offset
+            return
+        self._alert("warn", "clock", "could not read the venue's clock; using the local clock")
+
+    def _time(self) -> dt.datetime:
+        return self._now() + self._clock_offset
+
     def orders(self) -> list[WorkingOrder]:
         """Every order the manager knows, in staging order."""
         return [
             WorkingOrder(
                 order_id=t.order_id,
                 order=t.order,
+                quantity=t.quantity,
                 reference_price=t.reference_price,
                 phase=t.phase,
                 venue_orders=tuple(a.venue_order for a in t.attempts),
@@ -830,3 +1105,16 @@ def _check_supported(order: Order) -> None:
     expected: Side = "buy" if order.action == "enter" else "sell"
     if leg.side != expected:
         raise OrderManagerError(f"long-only: an {order.action} order must {expected}")
+
+
+def _reduced_reason(rule: str) -> OrderUpdateReason:
+    """What the final fill of a cut entry reports: the sim's reason when cash was the
+    limit, nothing otherwise (the journal's `order_reduced` record names the rule)."""
+    return "reduced_for_cash" if rule == "no_leverage" else ""
+
+
+def entry_limit_price(close: float, entry_limit_pct: float) -> float | None:
+    """The entry cap: `close * (1 + entry_limit_pct)`, rounded down to a whole cent.
+    None if that is less than one cent."""
+    cents = math.floor(close * (1 + entry_limit_pct) * 100 + 1e-9)
+    return cents / 100 if cents >= 1 else None

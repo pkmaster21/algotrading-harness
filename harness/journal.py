@@ -39,7 +39,9 @@ JournalKind = Literal[
     "fill",
     "adjustment",
     # the order manager (harness/orders.py)
+    "closes",
     "order_staged",
+    "order_reduced",
     "order_intent",
     "venue_state",
     "attempt_void",
