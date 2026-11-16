@@ -1057,8 +1057,33 @@ and, where one ran, a `reconcile` record whose stage is the command's name.
 - `record_adjustment` is the named-event path (`2024-01-04-AAPL-dividend`).
 - `promote_run` takes the run folder, not a run id.
 
-Not built here: a CLI for these commands. The PR 22 checklist needs one (kill from a
-second terminal, approve, flatten, accept); it is small and belongs with the runbook.
+As built (plan 20b): `harness/cli.py`, `python -m harness.cli <command>`, the command
+line the PR 22 checklist needs (kill from a second terminal, approve, flatten, accept).
+It parses arguments, calls one function of `service` or `control`, and prints the
+result; it holds no check of its own. Views: `status`, `positions`, `orders`, `pending`,
+`alerts`, `profiles`. Commands, each with a required `--operator`: `kill`, `reset-kill`,
+`approve`, `reject`, `reset-halt`, `flatten`, `accept`, `adjust`. `promote`, `activate`
+and `run` stay in `python -m harness.paper`.
+
+- `approve` takes `ORDER_ID=HASH`, the line `pending` prints under each entry's terms.
+  Approving by id alone would approve whatever the order is when the command runs, not
+  what the operator read, which is what the hash exists to prevent.
+- `reset-kill` and `flatten` take `--confirm <profile id>`, typed out. There is no
+  interactive prompt: a prompt cannot be scripted or tested, and the typed id is the
+  confirmation the functions already require.
+- Exit status: 0 the command did what it says; 1 it ran and left something for the
+  operator (`kill` without a confirmed cancel, `flatten` with a position still held or
+  a reconciliation stop); 2 refused or failed (`ControlError`, a config or profile
+  error, a journal that does not replay, a usage error), with the message on stderr;
+  3 crashed, with the traceback on stderr. An uncaught exception would exit 1 by
+  Python's default, which here means "something is left for you", so `main` catches
+  everything.
+- Open (issue #32): if the latch file cannot be written, `killswitch.kill`
+  returns an in-memory `KillState(engaged=True)` and says so only in the alert, so
+  `kill` can print "engaged" and exit 0 with no latch on disk. `KillState` needs to
+  say whether the latch was written; the CLI then exits 1 when it was not.
+- It sets up no log file. Alerts reach `alerts.jsonl` through the commands' default
+  sinks, and `alerts` prints them.
 
 Open, for the whole-slice review: an active profile that no longer verifies cannot be
 reconciled, so its kill cannot be reset, and activation of a replacement refuses while
@@ -1132,7 +1157,8 @@ that touches `harness/` shows the golden run unchanged. "Sensitive" follows the
 | 19 | `feat(paper): daily runner` | `paper.py`, CLI, crash-and-resume tests; the paper day's saved recipe records the whole `ExecutionConfig`, not only `limits`; a `RiskStateError` on a rerun (the mark differs from the first attempt) is reported as "account changed since the first attempt, reconcile first", not as a traceback; the runner checks that the orders it resumes were decided on the session just before today's (the order manager works any open order decided before `session`, and does not know the calendar); the runner builds the `Inbox` for the active profile and passes the approval mode from `active.json`; an order keeps the approval mode it was staged under; `on_session_open` reads the inbox on every pass, and the runner can call `ingest_inbox` at other times; `on_session_open` can be called again after a restart and picks up where the journal says it stopped; it raises `KillSwitchEngaged` after canceling what was open; `set_closes` must be given the close of every held symbol, not only the ones being traded (it refuses otherwise), and the closes are journaled, so a restarted manager does not need them again; the runner builds its strategy with `build_profile_strategy(profile)` (the frozen copy, never `strategies/<name>.py` or `build_strategy(recipe)`), gets its `PaperAccess` from `paper_access_for(load_profile(...))` (the test in `tests/test_paper_access.py` allows `PaperAccess(` in `profiles.py` and nowhere else in `harness/`), loads the risk state with `load_risk_state` and saves it with `save_risk_state` after the mark, and alerts on anything `paper_access_log_problems` returns; the CLI also exposes `promote_run` and `activate_profile` (activation needs the Alpaca adapter, so it lives with the runner, not in `profiles.py`), and a `PaperLogError` means no bars and no orders for the day; the runner calls `OrderManager.recover()` first and `set_closes` with the signal session's closes before the engine submits (a missing close fails the submit); a runner that engaged the latch itself keeps it in memory, so after a kill switch reset from another process the runner must be restarted (it exits on a kill anyway; document "after a reset, restart the runner"). Built: see "As built (plan 19)" in 1.6 | |
 | 19b | `feat(paper): trades and summary from the journal` | Split from 19 to keep it reviewable: `trades.csv` and `summary.json` in the profile's state folder, same schema as backtests, built from the journal's fills and `decision` records for sessions whose bar exists (through `t`), plus per fill the official open, seconds after the open, and slippage in basis points against it (0.2). Built: see "As built (plan 19b)" in 1.6 | Journal schema (the `decision` record gains `fill_opens` and `benchmark_close`); `report.py` (slice 1) gains `trades_from_fills`, which `round_trips` now calls; holdout handling (`DataLoader.raw_opens`, a second read past the cutoff under `PaperAccess`, and `fetch_raw` on the fetcher protocol) |
 | 20 | `feat(service): status and control functions` | `service.py`; `ui-design.md` contract update; `activate_profile` here takes `runner.lock` as the CLI does (`_runner_lock` in `paper.py`), so the active profile cannot change under a running day; resetting a drawdown halt journals who reset it, why, and the old peak (the reset erases it from state); adjustments get an `adjustment_id` that names the event (for example `2024-01-04-AAPL-dividend`), so entering one twice is a no-op; `reset_kill_switch` requires a clean reconciliation first (`KillSwitch.reset` only removes the latch), journals what it cleared, and tells the operator to restart the runner; `approve_orders` and `reject_orders` write `ApproveOrders` and `RejectOrders` to the inbox with `Inbox.put` (each approval quotes the `content_hash` from `pending_approvals`), and `list_pending_approvals` reads `pending_approvals.json` in the profile's state folder, which the runner writes after the decision and again when the day ends (only the runner holds the order manager); other control commands add their own command models to `harness/inbox.py`; test that `flatten` produces only sells of held quantity and works while killed (`OrderManager.send` refuses while the latch is set, so `flatten` needs its own confirmed path past that check; the ledger check that a sell never exceeds the position already applies). Built: see "As built (plan 20)" in 1.8 | `harness/` boundary (`KillSwitch.check(selling=...)` and `flattening()`, read by the order manager and the Alpaca adapter's `place`; `order_id_for` gains the `f<n>` kind); journal schema (`control`); `OrderUpdateReason` gains `flatten` |
-| 21 | `test(paper): end-to-end against the fake venue` | Multi-day buy-and-hold with injected faults; operator runbook | |
+| 20b | `feat(cli): operator command line` | Split from 20: `harness/cli.py`, a thin command line over `service` and `control` for the PR 22 checklist; no checks of its own; a test fails when `control` gains a command the CLI does not reach. Built: see "As built (plan 20b)" in 1.8 | |
+| 21 | `test(paper): end-to-end against the fake venue` | Multi-day buy-and-hold with injected faults; operator runbook; the runbook says that `python -m harness.cli` sets up no log file (alerts are in `alerts.jsonl`, shown by `alerts`), what its exit statuses mean, and that Ctrl-C during `flatten` ends it with Python's own status for an interrupt (not 0 to 3), after which `status` and `positions` show how far it got and `flatten` can be run again | |
 | 22 | End-to-end on the real paper account (run by you) | Checklist below; results recorded in `ARCHITECTURE.md` | Credentials |
 
 PRs 13, 14, 16, 11, 9, 12, and 19 are the safety-critical ones, in that order of
