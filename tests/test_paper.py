@@ -32,7 +32,7 @@ from harness.profiles import load_risk_state
 from harness.risk import RiskManager, RiskState
 from harness.view import PRICE_FIELDS, MarketView
 from strategies.base import Strategy
-from tests.fake_venue import FakeVenue, at
+from tests.fake_venue import FakeVenue, OrderScript, at
 from tests.fixture_strategies import Churn
 from tests.test_orders import ClockedInbox, Crash, CrashingJournal, Recorder
 from tests.test_profiles import COMMIT
@@ -740,6 +740,32 @@ def test_a_kill_from_another_process_during_the_open_stops_the_day(tmp_path: Pat
     again = rig.run()
     assert (again.outcome, again.resumed) == ("traded", True)
     assert rig.venue.place_attempts == [] and rig.kinds()[-1] == "day_complete"
+
+
+def test_an_entry_no_send_was_answered_for_kills_the_day_at_the_deadline(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.venue.script("SPY", OrderScript(timeouts_before_accept=99))  # no send is answered
+    report = rig.run()
+    # Still not at the venue when the deadline cancel has looked for it long enough: it
+    # may be there all the same, so the day stops instead of writing the order off.
+    assert report.outcome == "killed" and "day_complete" not in rig.kinds()
+    assert [(o.phase, o.reason) for o in report.orders] == [("unknown", "")]
+    assert [(a.severity, a.kind) for a in report.alerts] == [
+        ("critical", "order_unknown"),
+        ("critical", "kill_switch"),
+    ]
+    assert rig.kill_switch().state().source == "auto:orders"
+    assert "attempt_void" not in rig.kinds()
+    places = len(rig.venue.place_attempts)
+
+    # After a reset the runner looks the order up again. It never reached the venue, so
+    # it is voided then, and the day is finished without sending it again.
+    rig.kill_switch().reset("david", rig.profile_id, rig.profile_id)
+    again = rig.run()
+    assert (again.outcome, again.resumed) == ("traded", True)
+    assert [(o.phase, o.reason) for o in again.orders] == [("canceled", "session_deadline")]
+    assert "attempt_void" in rig.kinds() and rig.kinds()[-1] == "day_complete"
+    assert len(rig.venue.place_attempts) == places and rig.held() == {}
 
 
 def test_entries_wait_for_an_approval_read_from_the_pending_file(tmp_path: Path) -> None:

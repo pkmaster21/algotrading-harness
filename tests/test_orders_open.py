@@ -188,12 +188,14 @@ def test_exit_whose_sends_keep_failing_is_bounded(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     rig.venue.script("AAPL", OrderScript(timeouts_before_accept=10_000))
     rig.om.submit([order("AAPL", "sell", 10)])
-    assert run(rig) == [(X_AAPL, "canceled", "session_deadline", 0)]
+    with pytest.raises(SessionIncomplete, match="still does not show it"):
+        run(rig)
     intents = rig.kinds().count("order_intent")
     assert intents == 1 + CFG.max_submit_attempts  # tried again, but not forever
-    assert not rig.kill.engaged()
     assert {o.client_order_id for o in rig.venue.place_attempts} == {X_AAPL + "-a1"}
-    assert rig.alerts.kinds()[-1] == "exit_unfilled"
+    # No send was ever answered, so at the deadline it may be at the venue: the day stops.
+    assert rig.kill.engaged() and rig.phase(X_AAPL) == "unknown"
+    assert rig.alerts.kinds()[-1] == "kill_switch"
 
 
 # --------------------------------------------------------------------------- entries at release
@@ -328,14 +330,13 @@ def test_unknown_entry_stops_the_entries_behind_it(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     rig.venue.script("MSFT", OrderScript(timeouts_before_accept=99))
     rig.om.submit([order("MSFT", "buy", 3), order("NVDA", "buy", 4), order("AAPL", "sell", 10)])
-    updates = run(rig)
-    assert updates == [
-        (X_AAPL, "filled", "", 10),
-        (E_NVDA, "canceled", "unknown_outcome", 0),
-        (E_MSFT, "canceled", "unknown_outcome", 0),
-    ]
+    with pytest.raises(SessionIncomplete, match="still does not show it"):
+        run(rig)
+    updates = [(u.order_id, u.status, u.reason) for u in rig.om.poll_updates()]
+    assert updates == [(X_AAPL, "filled", ""), (E_NVDA, "canceled", "unknown_outcome")]
+    assert rig.phase(E_MSFT) == "unknown"  # still being looked for at the deadline: kills
     assert [p[0] for p in placed(rig)] == [X_AAPL + "-a1"]
-    assert rig.alerts.kinds() == ["order_unknown"]
+    assert rig.alerts.kinds() == ["order_unknown", "kill_switch"]
     rig.reconciles()
 
 
