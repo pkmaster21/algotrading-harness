@@ -35,6 +35,8 @@ raising `SessionIncomplete` it engages the kill switch itself.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import math
 import re
 import time
@@ -57,6 +59,7 @@ from harness.broker.venue import (
     VenueStatus,
 )
 from harness.config import MARKET_OPEN, ExecutionConfig
+from harness.inbox import ApproveOrders, Inbox, RejectOrders
 from harness.journal import Journal
 from harness.killswitch import KillSwitch, kill
 from harness.models import (
@@ -96,6 +99,36 @@ class SessionIncomplete(RuntimeError):
     data that contradicts the journal). The kill switch is already engaged."""
 
 
+ApprovalMode = Literal["off", "entries"]
+# "none": no approval needed (an exit, or approval is off). "pending": waiting for the
+# operator. "approved" and "denied" are the operator's answers.
+ApprovalState = Literal["none", "pending", "approved", "denied"]
+
+
+class ApprovalRefused(Exception):
+    """An approval or rejection does not fit the order it names. Nothing changed."""
+
+
+class ApprovalRequest(FrozenModel):
+    """An entry waiting for the operator, as it should be shown to them."""
+
+    order_id: str
+    content_hash: str  # of what is shown here; an approval must quote it
+    symbol: str
+    side: Side
+    quantity: int  # at most this many shares
+    limit_price: float  # at most this price per share
+    est_notional: float  # quantity * limit_price: the most the order can cost
+    expires_at: dt.datetime  # unapproved by then, the entry is canceled
+
+
+def approval_hash(order_id: str, symbol: str, side: Side, quantity: int, limit: float) -> str:
+    """Hash of the terms an operator approves. An approval quotes it, so it cannot be
+    applied to an order whose terms are different from the ones that were shown."""
+    terms = [order_id, symbol, side, quantity, f"{limit:.2f}"]
+    return hashlib.sha256(json.dumps(terms).encode()).hexdigest()
+
+
 class WorkingOrder(FrozenModel):
     """Order-manager state for one order. Rebuilt from the journal after a restart."""
 
@@ -107,6 +140,7 @@ class WorkingOrder(FrozenModel):
     venue_orders: tuple[VenueOrder, ...]  # attempts, oldest first; at most one not final
     filled_quantity: int
     reason: OrderUpdateReason = ""
+    approval: ApprovalState = "none"
 
 
 def _utc_now() -> dt.datetime:
@@ -156,6 +190,8 @@ class _Tracked:
     attempts: list[_Attempt] = field(default_factory=list)
     quantity: int = 0  # shares being worked; the order's own quantity unless cut at release
     fill_reason: OrderUpdateReason = ""  # reported with the final fill of a cut order
+    approval: ApprovalState = "none"
+    approved_hash: str = ""
 
     def __post_init__(self) -> None:
         self.quantity = self.quantity or self.order.quantity
@@ -193,10 +229,16 @@ class OrderManager(Broker):
         profile_id: str,
         risk: RiskManager,
         max_positions: int,
+        approval: ApprovalMode,
+        inbox: Inbox | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], dt.datetime] = _utc_now,
     ) -> None:
         profile_tag(profile_id)  # validates the profile id
+        if approval == "entries" and inbox is None:
+            raise OrderManagerError("approval of entries needs an inbox to receive it")
+        self._approval = approval
+        self._inbox = inbox
         self._venue = venue
         self._ledger = ledger
         self._journal = journal
@@ -269,9 +311,12 @@ class OrderManager(Broker):
                     "order_id": order_id,
                     "order": order.model_dump(mode="json"),
                     "reference_price": close,
+                    "approval": self._needs_approval(order),
                 },
             )
-            self._orders[order_id] = _Tracked(order_id, order, close)
+            self._orders[order_id] = _Tracked(
+                order_id, order, close, approval=self._needs_approval(order)
+            )
         return [order_id for order_id, _, _ in staged]
 
     # ------------------------------------------------------------------ sending
@@ -681,6 +726,8 @@ class OrderManager(Broker):
             attempt = tracked.last
             if attempt is None or attempt.state == "void":
                 tracked.phase = "idle" if tracked.filled else "staged"
+                if tracked.approval == "denied":  # died between the denial and the close
+                    self._close(tracked, "canceled", "approval_denied")
             elif attempt.state == "final":
                 self._settle(tracked, attempt, ())
             else:
@@ -698,7 +745,20 @@ class OrderManager(Broker):
                         raise OrderManagerError(f"{order_id} is not this profile's id for it")
                     reference = payload["reference_price"]
                     assert isinstance(reference, int | float)
-                    self._orders[order_id] = _Tracked(order_id, order, float(reference))
+                    wait = payload.get("approval", "none")
+                    assert wait in ("none", "pending")
+                    self._orders[order_id] = _Tracked(
+                        order_id,
+                        order,
+                        float(reference),
+                        approval=wait,  # type: ignore[arg-type]
+                    )
+                elif record.kind == "approval":
+                    tracked = self._orders[str(payload["order_id"])]
+                    decision = payload["decision"]
+                    assert decision in ("approved", "denied")
+                    tracked.approval = decision  # type: ignore[assignment]
+                    tracked.approved_hash = str(payload.get("content_hash", ""))
                 elif record.kind == "closes":
                     closes = payload["closes"]
                     assert isinstance(closes, dict)
@@ -817,6 +877,10 @@ class OrderManager(Broker):
         final or `session_deadline` passes. Ignores `opens`: real fills come from the
         venue.
 
+        0. With approval of entries on, commands are read from the inbox on every pass.
+           An entry still unapproved at `approval_deadline` is canceled
+           (`approval_timeout`); a rejected one is canceled at once
+           (`approval_denied`). Exits never wait for approval.
         1. Exits go into the opening auction (market, `opg`) until `opg_cutoff`; later
            ones go as market `day` orders. Whatever an auction order leaves unfilled is
            sent again as a market `day` order, and an auction order still working at
@@ -859,6 +923,7 @@ class OrderManager(Broker):
         cfg = self._cfg
         open_at, deadline = at(MARKET_OPEN), at(cfg.session_deadline)
         opg_cutoff, exit_deadline = at(cfg.opg_cutoff), at(cfg.exit_deadline)
+        approval_deadline = at(cfg.approval_deadline)
         exits = [t for t in live if t.side == "sell"]
         entries = [t for t in live if t.side == "buy"]  # staging order is rank order
         sends: dict[str, int] = {}  # exit order id -> sends this session
@@ -870,6 +935,7 @@ class OrderManager(Broker):
                 break
             if now >= open_at:
                 self.refresh()
+            self._work_approvals(entries, approval_deadline, now)
             for tracked in exits:
                 self._work_exit(tracked, session, sends, now < opg_cutoff, now >= exit_deadline)
             exits_final = all(t.phase in TERMINAL_PHASES for t in exits)
@@ -878,7 +944,9 @@ class OrderManager(Broker):
                     self._work_entry(tracked, session)
             if all(t.phase in TERMINAL_PHASES for t in live):
                 break
-            upcoming = min(b for b in (open_at, exit_deadline, deadline) if b > now)
+            upcoming = min(
+                b for b in (approval_deadline, open_at, exit_deadline, deadline) if b > now
+            )
             self._sleep(max(min(cfg.poll_seconds, (upcoming - now).total_seconds()), 0.001))
 
         def reason(tracked: _Tracked) -> OrderUpdateReason:
@@ -934,7 +1002,7 @@ class OrderManager(Broker):
         if tracked.phase == "idle":  # the venue ended it early; entries are not sent twice
             self._close(tracked, "canceled", "limit_not_reached")
             return
-        if tracked.phase != "staged":
+        if tracked.phase != "staged" or tracked.approval == "pending":
             return
         if tracked.order.created_on in self._blocked:
             self._close(tracked, "canceled", "unknown_outcome")
@@ -972,6 +1040,177 @@ class OrderManager(Broker):
         if decision.approved_quantity < tracked.quantity:
             self._reduce(tracked, decision)
         self.send(tracked.order_id, session, type="limit", time_in_force="day", limit_price=limit)
+
+    # ------------------------------------------------------------------ approval
+
+    def pending_approvals(self, session: dt.date) -> list[ApprovalRequest]:
+        """The entries waiting for the operator, for the open of `session`."""
+        expires = dt.datetime.combine(session, self._cfg.approval_deadline, MARKET_TZ)
+        requests = []
+        for tracked in self._orders.values():
+            terms = self._approval_terms(tracked)
+            if tracked.approval != "pending" or tracked.phase != "staged" or terms is None:
+                continue
+            content_hash, limit = terms
+            requests.append(
+                ApprovalRequest(
+                    order_id=tracked.order_id,
+                    content_hash=content_hash,
+                    symbol=tracked.order.symbol,
+                    side=tracked.side,
+                    quantity=tracked.quantity,
+                    limit_price=limit,
+                    est_notional=tracked.quantity * limit,
+                    expires_at=expires,
+                )
+            )
+        return requests
+
+    def ingest_inbox(self, approval_deadline: dt.datetime | None = None) -> None:
+        """Read and act on every command waiting in the inbox. A command that does not
+        fit is refused with an alert and a journal record; it never raises.
+
+        Safe to repeat: a command read twice (the process died before removing its
+        file) changes nothing the second time.
+        """
+        self._require_recovered()
+        if self._inbox is None:
+            return
+        for item in self._inbox.read():
+            command = item.command
+            if command is None:
+                self._refuse_command(item.path.name, f"cannot be read: {item.error}")
+                self._inbox.quarantine(item.path)
+                continue
+            if isinstance(command, ApproveOrders):
+                for order_id, content_hash in command.approvals.items():
+                    try:
+                        self._approve(
+                            order_id, content_hash, command, item.written_at, approval_deadline
+                        )
+                    except ApprovalRefused as exc:
+                        self._refuse_command(item.path.name, f"approve {order_id}: {exc}")
+            else:
+                for order_id in command.order_ids:
+                    try:
+                        self._deny(order_id, command)
+                    except ApprovalRefused as exc:
+                        self._refuse_command(item.path.name, f"reject {order_id}: {exc}")
+            self._inbox.remove(item.path)
+
+    def _approve(
+        self,
+        order_id: str,
+        content_hash: str,
+        command: ApproveOrders,
+        written_at: dt.datetime | None,
+        approval_deadline: dt.datetime | None,
+    ) -> None:
+        tracked = self._orders.get(order_id)
+        if tracked is None:
+            raise ApprovalRefused("unknown order")
+        if tracked.side != "buy":
+            raise ApprovalRefused("exits are never gated; there is nothing to approve")
+        if tracked.approval == "approved" and tracked.approved_hash == content_hash:
+            return  # the same approval again
+        if tracked.approval != "pending" or tracked.phase != "staged":
+            raise ApprovalRefused(
+                f"the order is not waiting for approval ({tracked.phase}, {tracked.approval})"
+            )
+        # When was this decided? The command says (`at`), but a writer can say anything.
+        # The file's own time is the later bound: nothing was decided after it was
+        # written, and nothing written after the deadline counts, whatever it claims.
+        if written_at is None:
+            raise ApprovalRefused("the command file's time cannot be read")
+        skew = dt.timedelta(seconds=self._cfg.max_clock_skew_seconds)
+        if command.at > self._time() + skew:
+            raise ApprovalRefused(f"decided at {command.at.isoformat()}, which is in the future")
+        decided = max(command.at, written_at)
+        if approval_deadline is not None and decided > approval_deadline:
+            said = command.at.astimezone(MARKET_TZ).isoformat()
+            written = written_at.astimezone(MARKET_TZ).isoformat()
+            raise ApprovalRefused(
+                f"decided after the deadline (it says {said}; its file was written {written})"
+            )
+        terms = self._approval_terms(tracked)
+        if terms is None or terms[0] != content_hash:
+            raise ApprovalRefused("the order is not the one that was shown (hash mismatch)")
+        self._journal.append(
+            "approval",
+            {
+                "order_id": order_id,
+                "decision": "approved",
+                "operator": command.operator,
+                "content_hash": content_hash,
+                "at": command.at.isoformat(),
+                "written_at": written_at.isoformat(),
+            },
+        )
+        tracked.approval = "approved"
+        tracked.approved_hash = content_hash
+
+    def _deny(self, order_id: str, command: RejectOrders) -> None:
+        tracked = self._orders.get(order_id)
+        if tracked is None:
+            raise ApprovalRefused("unknown order")
+        if tracked.side != "buy":
+            raise ApprovalRefused("exits are never gated; an exit cannot be rejected")
+        if tracked.approval == "denied":
+            return  # the same rejection again
+        if tracked.phase != "staged":
+            raise ApprovalRefused(f"the order is already {tracked.phase}")
+        self._journal.append(
+            "approval",
+            {
+                "order_id": order_id,
+                "decision": "denied",
+                "operator": command.operator,
+                "reason": command.reason,
+                "at": command.at.isoformat(),
+            },
+        )
+        tracked.approval = "denied"
+        self._close(tracked, "canceled", "approval_denied")
+
+    def _work_approvals(
+        self, entries: Sequence[_Tracked], approval_deadline: dt.datetime, now: dt.datetime
+    ) -> None:
+        if self._inbox is None:
+            return
+        # Every pass, whatever is waiting: a rejection counts until the entry is sent,
+        # and a command that fits nothing is refused now, not left for another day.
+        self.ingest_inbox(approval_deadline)
+        if now < approval_deadline:
+            return
+        late = [t for t in entries if t.phase == "staged" and t.approval == "pending"]
+        for tracked in late:
+            self._close(tracked, "canceled", "approval_timeout")
+        if late:
+            self._alert(
+                "warn",
+                "approval_timeout",
+                f"{len(late)} entries were not approved by the deadline and were canceled: "
+                + ", ".join(t.order_id for t in late),
+            )
+
+    def _needs_approval(self, order: Order) -> Literal["none", "pending"]:
+        return "pending" if self._approval == "entries" and order.action == "enter" else "none"
+
+    def _approval_terms(self, tracked: _Tracked) -> tuple[str, float] | None:
+        """The hash an approval of this entry must quote, and its limit price."""
+        limit = entry_limit_price(tracked.reference_price, self._cfg.entry_limit_pct)
+        if limit is None:
+            return None
+        return (
+            approval_hash(
+                tracked.order_id, tracked.order.symbol, tracked.side, tracked.quantity, limit
+            ),
+            limit,
+        )
+
+    def _refuse_command(self, name: str, why: str) -> None:
+        self._journal.append("command_refused", {"file": name, "why": why})
+        self._alert("warn", "command_refused", f"inbox command {name} refused: {why}")
 
     def _refuse(self, tracked: _Tracked, why: str) -> None:
         self._alert("warn", "entry_refused", f"entry {tracked.order_id} not sent: {why}")
@@ -1025,6 +1264,7 @@ class OrderManager(Broker):
                 venue_orders=tuple(a.venue_order for a in t.attempts),
                 filled_quantity=t.filled,
                 reason=t.reason,
+                approval=t.approval,
             )
             for t in self._orders.values()
         ]

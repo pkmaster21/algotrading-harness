@@ -52,7 +52,7 @@ class OrderManagerRig(BrokerRig):
         risk = RiskManager(LOOSE, CFG.limits, CFG.entry_limit_pct, RiskState.initial(starting_cash))
         self.broker = OrderManager(
             self.venue, self.ledger, journal, KillSwitch(directory / "KILL"), None, CFG, PROFILE,
-            risk, 10, sleep=self.venue.advance, now=lambda: self.venue.clock,
+            risk, 10, "off", sleep=self.venue.advance, now=lambda: self.venue.clock,
         )  # fmt: skip
         self.broker.recover()
         self.broker.set_closes(dict.fromkeys(SYMBOLS, 100.0))
