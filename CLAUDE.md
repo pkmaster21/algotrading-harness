@@ -12,6 +12,7 @@ Strategies are pluggable modules; the harness owns everything else.
 | Which file owns what         | `ARCHITECTURE.md` → Components             |
 | Unresolved decisions         | `ARCHITECTURE.md` → Open questions         |
 | UI principles and contract   | `docs/ui-design.md`                        |
+| Operating paper trading      | `docs/paper-runbook.md`                    |
 | Results of a past backtest   | `backtests/<run>/summary.json` (see below) |
 
 Read `ARCHITECTURE.md` when planning a new slice or changing the harness,
