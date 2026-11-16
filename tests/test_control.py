@@ -237,6 +237,41 @@ def test_a_second_flatten_tries_again_under_a_new_id(tmp_path: Path) -> None:
     assert second.orders[0].order_id.endswith("-SPY-f2")
 
 
+class _CtrlC(BaseException):
+    """What Ctrl-C is to the command: not an Exception, so nothing cleans up."""
+
+
+def test_a_sell_an_interrupted_flatten_left_behind_is_never_sent_by_the_runner(
+    tmp_path: Path,
+) -> None:
+    rig, quantity = holding_spy(tmp_path)
+    rig.morning(D2)
+
+    def interrupted(seconds: float) -> None:
+        raise _CtrlC
+
+    with pytest.raises(_CtrlC):
+        control.flatten(ME, rig.profile_id, **kw(rig, sleep=interrupted))
+    (left,) = rig.venue.open_orders()  # the auction sell is at the venue, not final
+    assert left.client_order_id.endswith("-SPY-f1-a1")
+
+    # The operator decides not to sell after all: cancel it, reset, trade on.
+    assert control.engage_kill_switch("not selling after all", ME, **kw(rig)).cancel_confirmed
+    control.reset_kill_switch(ME, rig.profile_id, **kw(rig))
+    places = len(rig.venue.place_attempts)
+    report = rig.run()
+
+    assert report.outcome == "traded" and rig.held() == {"SPY": quantity}
+    assert len(rig.venue.place_attempts) == places  # the sell was not sent again
+    (sell,) = [o for o in service.list_orders(execution=rig.execution) if "-f1" in o.order_id]
+    assert (sell.phase, sell.reason, sell.filled_quantity) == ("canceled", "flatten", 0)
+    assert [(a.severity, a.kind) for a in report.alerts] == [("critical", "flatten_unfinished")]
+    assert f"{quantity} of {quantity} shares unsold" in report.alerts[0].message
+    # A flatten after that sells under a new id.
+    again = control.flatten(ME, rig.profile_id, **kw(rig))
+    assert again.remaining == {} and again.orders[0].order_id.endswith("-SPY-f2")
+
+
 def test_after_a_flatten_nothing_trades_until_the_switch_is_reset(tmp_path: Path) -> None:
     rig, _ = holding_spy(tmp_path)
     control.flatten(ME, rig.profile_id, **kw(rig))
