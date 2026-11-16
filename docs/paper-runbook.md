@@ -20,8 +20,10 @@ design doc).
 | `uv run python -m harness.cli` | views: `status`, `positions`, `orders`, `pending`, `alerts`, `profiles`; commands: `kill`, `reset-kill`, `approve`, `reject`, `reset-halt`, `flatten`, `accept`, `adjust` | `kill`, `reset-kill`, `flatten`, `accept` |
 
 The views read files only. They are safe at any time, also while the runner is running.
-Every command of `harness.cli` needs `--operator <name>`, and what it did is recorded
-in the journal under that name.
+Every command of `harness.cli` needs `--operator <name>`. The commands that change the
+books record what they did in the journal under that name. `kill` is the exception: it
+writes the latch and an alert only, and the journal first names it at `reset-kill`,
+which records the latch it cleared.
 
 Keys come from `.env` only (`ALPACA_PAPER_API_KEY`, `ALPACA_PAPER_SECRET_KEY`). They are
 never exported and never logged.
@@ -108,11 +110,17 @@ Running the day a second time is safe: it reports `already_done` and sends nothi
 
 | What you see | What happened | What to do |
 |---|---|---|
-| Outcome `skipped_stale_data` | Yesterday's bar of the benchmark is not there yet. Nothing was decided. | Nothing today. A rerun the same day does not pick up a bar that arrives late, because the bar cache already counts that day as fetched. The next morning's run fetches it and carries on, with a `missed_sessions` warning. |
-| `missed_sessions` warning | The runner did not complete one or more sessions (machine off, stale data, a kill). | Nothing. It decides on the latest close. Those days have no row in `equity.csv`. |
+| Outcome `skipped_stale_data` | Yesterday's bar of the benchmark is not there yet. Nothing was decided. | Nothing today. The alert says to run again once the bar is there, but a rerun the same day does not pick up a bar that arrives late, because the bar cache already counts that day as fetched (issue #34). The next morning's run fetches it and carries on, with a `missed_sessions` warning. |
+| `missed_sessions` warning | The runner did not complete one or more sessions (machine off, stale data, a kill). | Nothing. It decides on the latest close. A day that was never decided has no row in `equity.csv`; a day that was decided and then killed has one. |
 | Outcome `failed`, alert `venue_unavailable` | Alpaca did not answer after several tries. Nothing was sent after the failure. | Run again. |
 | Outcome `failed`, alert `venue_setup` | The paper keys are missing from `.env`, or the venue could not be set up. Nothing was asked of Alpaca. | Fix `.env`, run again. |
 | Outcome `failed`, alert `account_setup` or `wrong_account` | The account settings are not the safe ones, or the keys are for another account than the one activated. | Fix the account settings or `.env`, run again. |
+| Outcome `failed`, alert `data` | The bars could not be loaded. No orders today. | Run again. If it keeps failing, check the Alpaca data API and the keys. |
+| Outcome `failed`, alert `paper_access_log` | The paper access log (`data_access_log.csv`) cannot be read or written, so no bars past the holdout cutoff are read. No orders today. | Make the file readable and writable, run again. A critical `paper_access_log` alert saying holdout data was read without a real profile does not fail the day: find what read it. |
+| Outcome `failed`, alert `state` | The journal, the saved state or the risk state does not load, or they disagree. Nothing was sent by this run (on a resumed day, an earlier run may already have sent orders). | Stop. Do not edit the files in `state/paper/<profile id>/` by hand; find out why first. |
+| Outcome `failed`, alert `account_changed` | A second attempt at the same day's decision found a different equity than the first (something was booked in between, or a bar changed). Nothing was sent, exits included. | Check `orders` and `positions` against the account. The next session decides afresh. |
+| Outcome `failed`, alert `decision_changed` | A second attempt at the same day's decision staged different orders than the first: the bars or the account changed in between. Nothing was sent. | Nothing. The next session closes the staged orders and decides afresh. |
+| Outcome `failed`, alert `unknown_position` | The ledger holds a symbol outside the profile's universe, or one with no bar. No orders today. | Sell it at the broker, then `accept`, then run. |
 | Outcome `failed`, alert `decision_failed` | The strategy raised. No orders; positions untouched. | The frozen strategy is broken: fix it in `strategies/`, backtest, promote and activate a new profile. |
 | The process died (crash, power, Ctrl-C) | Whatever was sent is at Alpaca; the journal has the intent. | Run again. It resumes from the journal: it does not decide twice and does not send an order twice (order ids are fixed by the decision, and an unanswered send is looked up before anything is re-sent). Ctrl-C does not cancel anything, and `status` shows the run before it until the next run: to stop a day, use `kill`. |
 | Outcome `killed` | The kill switch is engaged. See below. | See below. |
@@ -126,10 +134,19 @@ orders; it never sells.
   `uv run python -m harness.cli kill --reason "<why>" --operator <name>`
   Status 1 means the cancel was not confirmed: check the broker and run `kill` again.
 - The runner engages it on: a reconciliation difference, an order whose outcome is
-  unknown, an open workflow that could not finish, clock skew over 30 seconds, a profile
-  or strategy file that no longer verifies, any error it does not expect.
+  still unknown at the session deadline, an open workflow that could not finish, an
+  order from another day still at the venue, clock skew over 30 seconds, a profile or
+  strategy file that no longer verifies, any error it does not expect.
 - `status` shows who engaged it, when, why, and whether the cancel was confirmed.
 - While it is engaged, `run` reports `killed` and touches nothing.
+- A hung runner holds `runner.lock`, so `reset-kill`, `reset-halt`, `flatten`, `accept`,
+  `adjust` and `activate` are refused until that process is ended (`kill` still works).
+  The lock is released when the process dies.
+- If the kill was for a profile or strategy file that no longer verifies, only `kill`
+  works: `reset-kill`, `flatten`, `accept`, `adjust` and `reset-halt` all load the
+  profile and are refused, and a new profile cannot be activated while the latch is
+  set. Positions can only be sold at the broker, and there is no way back yet
+  (issue #44).
 
 To reset:
 
@@ -185,6 +202,10 @@ buy and hold enters again.
 
 Status 1 means a position is still held or the account and ledger differ: the output
 names each. Run `flatten` again, or sell at the broker and `accept`.
+
+An auction sell the venue rejects is final: the flatten ends with the position held,
+and a second flatten before 09:25 is rejected the same way (issue #38). Run `flatten`
+again from 09:25 on, when it sends market orders.
 
 ### Ctrl-C during flatten
 

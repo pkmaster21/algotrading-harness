@@ -1168,27 +1168,54 @@ this doc.
 
 **End-to-end paper checklist (PR 22), using `strategies/example_buy_and_hold.py`:**
 
-1. Set the paper account: shorting off, margin multiplier 1, balance at or above
-   `starting_cash`. `verify_account` passes.
-2. `promote_run(..., plumbing=True)` and `activate_profile(..., approval="entries")`.
-3. Day 1: approve the SPY entry; confirm the fill, the ledger, and a clean reconciliation.
-   Record whether the paper simulator filled the limit near the open.
-4. Day 2: no orders; reconciliation clean; equity point written.
-5. Run the day twice: second run reports `already_done`, no new orders at Alpaca.
-6. Kill the runner process mid-open on a day with an order (re-activate flat to get one);
-   restart; one order at Alpaca, not two.
-7. Engage the kill switch from a second terminal; confirm the next run refuses; reset.
-8. Place a manual order in the Alpaca dashboard; confirm reconciliation stops trading;
-   `accept_broker_state`.
-9. `flatten`: confirms the market-on-open exit path and records whether paper honors OPG.
-10. Answer on purpose what the docs did not (verify list): does paper accept and fill an
-    `opg` order at the open; does a paper fill carry any fee (compare ledger cash with the
-    account after the first sell); what does a repeated `client_order_id` return; does a
-    symbol with a `.` trade under its mapped order id; does Alpaca answer 403 for an
-    entry that exceeds buying power (the adapter treats 403 on an order as a rejection);
-    does turning `no_shorting` on change the account's `shorting_enabled` field (if it
-    does, `verify_account` can also refuse when the two disagree).
-11. Before step 1, set `no_shorting` on and `max_margin_multiplier` to 1 in the paper
-    account's settings by hand. The adapter checks them (`verify_account`) and never
-    changes account settings.
-10. Compare paper fills with the official opens; note the slippage against 5 bps.
+Commands are named as in `docs/paper-runbook.md`. The order matters: `accept` after a
+trade made by hand stops `trades.csv` and `summary.json`, so it comes last, after the
+flatten and the slippage comparison.
+
+1. In the paper account's settings, by hand: `no_shorting` on, `max_margin_multiplier`
+   1, balance at or above `starting_cash`. The adapter checks these (`verify_account`)
+   and never changes account settings.
+2. First check: does the account's own `multiplier` field read 1 once
+   `max_margin_multiplier` is 1? `verify_account` believes the account over the
+   setting, so if it does not, every command that verifies the account refuses. Step
+   3's `activate` shows it: a refusal saying "the account reports a margin multiplier"
+   means stop here and raise it. Also note whether turning `no_shorting` on changes the
+   account's `shorting_enabled` field (if it does, `verify_account` could also refuse
+   when the two disagree).
+3. Make the backtest run (the runbook's setup step 2), then
+   `harness.paper promote backtests/<run> <name> --plumbing` and
+   `harness.paper activate <profile id> --approval entries --operator <name>`.
+4. Day 1: approve the SPY entry; confirm the fill, the ledger, and a clean
+   reconciliation. Record whether the paper simulator filled the limit near the open.
+5. Day 2: no orders; reconciliation clean; equity point written.
+6. Run the day twice: the second run reports `already_done`, no new orders at Alpaca.
+7. `harness.cli kill` from a second terminal; confirm the next run refuses (`killed`);
+   `harness.cli reset-kill`.
+8. Early, on the next session: `harness.cli flatten` before 09:25. This is the first
+   `opg` order, so it settles whether paper accepts an auction order and fills it at
+   the open. If the venue rejects it, the flatten ends with the position held and a
+   second flatten before 09:25 is rejected again (issue #38): run flatten again from
+   09:25 on, and note that strategy exits will fail the same way until #38 is fixed.
+   Compare ledger cash with the account after this first sell: does a paper fill carry
+   any fee? Do not reset or run again that day: leave the kill switch engaged, or buy
+   and hold enters again the same morning and step 9 has no entry to work with.
+9. On the next session: `harness.cli reset-kill`, then run. That run decides on the
+   flatten day's close, so buy and hold enters again from the flat account, and it
+   journals the flatten day's official open, which step 10 needs. Crash test on this
+   day: approve the entry, kill the runner process before 09:30, restart, and confirm
+   one order at Alpaca, not two. (A marketable limit fills at once on paper, so the
+   window between sending and recording cannot be hit by hand; the fake-venue test
+   covers it.)
+10. Compare paper fills with the official opens (`trades.csv`, `summary.json`); note the
+    slippage against 5 bps.
+11. Last: place a manual market order in the Alpaca dashboard during market hours, in
+    a `plumbing-10` symbol (SPY is simplest: `accept` refuses a symbol outside the
+    universe, and an order that has not filled is only canceled by the kill); confirm
+    the next run kills on the reconciliation difference; `harness.cli accept`, then `reset-kill`. From here
+    `trades.csv` and `summary.json` stop updating.
+
+Not answered by this run, because the harness never sends such an order: what a
+repeated `client_order_id` returns, whether a symbol with a `.` trades under its mapped
+order id (`plumbing-10` has none), and whether Alpaca answers 403 for an entry that
+exceeds buying power. They stay open in the verify list above; settle them from
+Alpaca's docs or support, or with a one-off request outside the harness.
