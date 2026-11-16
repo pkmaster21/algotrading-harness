@@ -61,6 +61,7 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/journal.py` | Append-only, fsynced event log; the source of truth for paper trading state. The writer holds an exclusive file lock | 2 |
 | `harness/broker/alpaca.py` | `AlpacaBroker`: the venue for the Alpaca paper account, and the only trading network code. No mode or URL argument; sorts every failure into rejected, unknown, or untrustworthy | 2 |
 | `harness/profiles.py` | Frozen profiles: a validated run frozen into values (recipe, execution settings, strategy source hash) under an id that is its content hash. Promotion refuses a run that is not ready (dirty tree, no risk preset, no holdout run, strategy keeps state across sessions); loading verifies the profile file and its frozen copy of the strategy, which is what trades (`strategies/` can keep changing); activation binds the flat, venue-verified paper account to one profile, records it, and seeds its risk state. The one place a `PaperAccess` is built | 2 |
+| `harness/paper.py` | The paper runner: `run_trading_day` runs one day for the active frozen profile (verify the account and the clock, recover, reconcile, decide on the last completed session, work the open, reconcile, write the derived files) and is safe to run twice: the journal's `decision` record separates deciding from trading, so a rerun never decides or sends twice. Reads the clock so the engine does not. Plus the CLI (`run`, `promote`, `activate`) | 2 |
 | `harness/pricing.py` | Implied volatility and Greeks | Options |
 
 Each component starts as the simplest rule that works and is upgraded only when
@@ -344,8 +345,10 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   of the account; then equity changes need to be net of cash flows. The ledger has the
   same gap: a `LedgerAdjustment` that adds shares with a cost basis and no cash (a
   transfer-in) is booked as a realized gain equal to the cost basis.
-- A paper run that starts after `session_deadline` sends nothing: staged exits are closed
-  as `session_deadline` with a critical alert, and the positions are kept another day.
+- A paper run that starts after `session_deadline` sends nothing. The runner does not
+  decide at all (`late_start`, the day fails and stays open); a day decided earlier and
+  resumed that late has its staged exits closed as `session_deadline` with a critical
+  alert. Either way the positions are kept another day.
   That is the right failure for entries. For exits, sending them late as market orders
   would reduce risk sooner. Kept as built for paper, where a late start is something to
   investigate; decide before live.
@@ -364,6 +367,11 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   unrealized ones (shares marked at the last close). Common in paper, where the report is
   written daily. Fine for judging a strategy; not for realized P&L (taxes, once live).
   When needed, add `exit_quantity` and `realized_pnl` columns rather than splitting rows.
+- What fails a paper day without setting the kill latch: an account that does not pass
+  `verify_account`, keys for an account other than the activated one, the venue or the
+  data source not answering. The next run tries again by itself once the cause is gone.
+  Right for an attended paper run (the alert is read the same morning); before unattended
+  use, decide whether an unsafe account setup should latch instead.
 - Vendor adjustment lag: the overlap check compares the last `overlap_bars` cached bars.
   If Alpaca applies a split or dividend adjustment more than that many sessions after the
   ex-date, the check passes and the cache mixes scales until the scheduled full refresh

@@ -95,6 +95,11 @@ class OrderManagerError(RuntimeError):
     """The order manager was used incorrectly. Nothing was sent."""
 
 
+class StagedOrderChanged(OrderManagerError):
+    """An order was submitted again with different content than the one already staged
+    under its id: what the decision was made from changed between two attempts."""
+
+
 class SessionIncomplete(RuntimeError):
     """The manager cannot vouch for its orders (a cancel that will not confirm, venue
     data that contradicts the journal). The kill switch is already engaged."""
@@ -306,7 +311,7 @@ class OrderManager(Broker):
             existing = self._orders.get(order_id)
             if existing is not None:
                 if existing.order != order:
-                    raise OrderManagerError(
+                    raise StagedOrderChanged(
                         f"order {order_id} was already staged with different content"
                     )
                 staged.append((order_id, order, None))
