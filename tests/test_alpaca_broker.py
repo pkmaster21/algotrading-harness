@@ -318,7 +318,7 @@ def test_latch_engaged_makes_place_raise_without_any_request(rig: Rig) -> None:
 def test_the_flatten_pass_lets_a_sell_through_the_latch_and_never_a_buy(rig: Rig) -> None:
     rig.kill.engage("test", "operator:cli")
     rig.session.on("POST", "/v2/orders", body=order_json())
-    with rig.kill.flattening():
+    with rig.kill.flattening(rig.kill.state()):
         assert rig.broker.place(exit_order()).client_order_id == "0a1b2c3d-20240102-AAPL-x-a1"
         with pytest.raises(KillSwitchEngaged):
             rig.broker.place(entry_order())

@@ -180,6 +180,67 @@ def test_a_kill_from_elsewhere_stops_a_running_flatten(tmp_path: Path) -> None:
     assert "flatten_stopped" in rig.alerts.kinds() and rig.kill.engaged()
 
 
+def test_a_kill_that_cannot_confirm_its_cancel_still_stops_a_running_flatten(
+    tmp_path: Path,
+) -> None:
+    # Issue #40, part 1: the kill's cancel fails, so it never writes "cancel confirmed".
+    rig = OrdersRig(tmp_path)
+    rig.kill.engage("flatten", "operator:david")
+    reports: list[Any] = []
+
+    def sleep(seconds: float) -> None:
+        if not reports and len(rig.venue.place_attempts) == 2:  # both sells are out
+            rig.venue.fail_next("cancel_all", times=1)
+            reports.append(
+                kill(KillSwitch(rig.kill.path), "stop everything", "operator:other",
+                     venue=rig.venue, attempts=1, now=lambda: rig.venue.clock)
+            )  # fmt: skip
+        rig.venue.advance(seconds)
+
+    rig.om._sleep = sleep
+    with pytest.raises(SessionIncomplete, match="flatten stopped"):
+        rig.om.flatten(OD1, OD0, at(OD1, 9, 50))
+    assert not reports[0].cancel_confirmed and reports[0].kills == 1
+    assert rig.venue.open_orders() == [] and len(rig.venue.place_attempts) == 2
+    assert rig.venue.clock < at(OD1, 8, 1)
+    assert {p.symbol: p.quantity for p in rig.venue.positions()} == {"AAPL": 10, "TSLA": 5}
+    flattens = [o for o in rig.om.orders() if o.order_id.endswith("-f1")]
+    assert [(o.phase, o.reason) for o in flattens] == [("canceled", "kill_switch")] * 2
+    assert "flatten_stopped" in rig.alerts.kinds() and rig.kill.engaged()
+
+
+def test_a_kill_between_the_look_at_the_latch_and_a_send_stops_that_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Issue #40, part 2: the flatten's pass has looked at the latch and is about to send
+    # its second sell when a kill runs and reports "no open orders remain".
+    rig = OrdersRig(tmp_path)
+    rig.kill.engage("flatten", "operator:david")
+    reports: list[Any] = []
+    work_exit = type(rig.om)._work_exit
+
+    def kill_then_work(om: Any, tracked: Any, *args: Any) -> None:
+        if not reports and len(rig.venue.place_attempts) == 1:  # one sell is out
+            reports.append(
+                kill(KillSwitch(rig.kill.path), "stop everything", "operator:other",
+                     venue=rig.venue, sleep=rig.venue.advance, now=lambda: rig.venue.clock)
+            )  # fmt: skip
+        work_exit(om, tracked, *args)
+
+    monkeypatch.setattr(type(rig.om), "_work_exit", kill_then_work)
+    with pytest.raises(SessionIncomplete, match="flatten stopped"):
+        rig.om.flatten(OD1, OD0, at(OD1, 9, 50))
+    assert reports[0].cancel_confirmed
+    assert len(rig.venue.place_attempts) == 1  # nothing was sent after the kill's report
+    assert rig.venue.open_orders() == []
+    assert {p.symbol: p.quantity for p in rig.venue.positions()} == {"AAPL": 10, "TSLA": 5}
+    flattens = [o for o in rig.om.orders() if o.order_id.endswith("-f1")]
+    assert [(o.phase, o.reason) for o in flattens] == [("canceled", "kill_switch")] * 2
+    assert "flatten_stopped" in rig.alerts.kinds() and rig.kill.engaged()
+    rig.restart()  # the journal replays: the second sell never reached the venue
+    assert [o.phase for o in rig.om.orders() if o.order_id.endswith("-f1")] == ["canceled"] * 2
+
+
 def test_flatten_sells_no_more_than_the_venue_holds(tmp_path: Path) -> None:
     rig = OrdersRig(tmp_path)  # the ledger holds AAPL 10 and TSLA 5
     rig.venue.hold("AAPL", 6, 100.0)  # the venue holds 6: a sell for 10 would be rejected
@@ -669,7 +730,7 @@ def test_activation_goes_through_the_same_checks(tmp_path: Path) -> None:
 def test_the_sell_pass_is_for_sells_inside_the_block_only(tmp_path: Path) -> None:
     switch = KillSwitch(tmp_path / "KILL")
     switch.engage("stop", "operator:test")
-    with switch.flattening():
+    with switch.flattening(switch.state()):
         switch.check(selling=True)
         with pytest.raises(KillSwitchEngaged):
             switch.check()

@@ -1041,13 +1041,19 @@ and, where one ran, a `reconcile` record whose stage is the command's name.
   day without a session and after the close, and runs until every sell is final or the
   session deadline (started after the open: for the length of the open workflow, never
   past the close).
-- A kill from another terminal stops a running flatten. The flatten marks the latch
-  "orders may be open" (`KillSwitch.orders_sent`, which clears `cancel_confirmed`) and
-  reads the latch file on every pass (`on_disk`); a kill that confirms its cancel sets
-  the mark back, and a latch that is no longer the one the flatten started under ends
-  it: sells pulled, `SessionIncomplete`. So nothing is sent after a kill's report. If
-  the mark cannot be written (or the latch file is not readable), the flatten refuses
-  before sending anything.
+- A kill from another terminal stops a running flatten, whether or not the kill
+  confirms its cancel (issue #40). The flatten marks the latch "orders may be open"
+  (`KillSwitch.orders_sent`, which clears `cancel_confirmed`). Every kill counts itself
+  in the latch file (`KillState.kills`, written by `KillSwitch.note_kill`) after it
+  engages and before it asks the venue anything, so the file changes on every kill.
+  The flatten reads the file on every pass (`on_disk`), and its pass for sells
+  (`KillSwitch.flattening(under)`) reads it again before every send: a latch that is no
+  longer the one the flatten started under sends nothing more and ends it (sells
+  pulled, `SessionIncomplete`). What is left is a request already on its way to the
+  venue when the kill began; the stopping flatten cancels it. If the mark cannot be
+  written (or the latch file is not readable), the flatten refuses before sending
+  anything. If a kill cannot write its count, its alert says a running flatten may not
+  have stopped.
 - Flatten's sells count against `max_orders_per_session`. On a session that has used
   the cap up, the next send is a violation: everything stops with positions still held
   (fails closed). The operator sells at the broker and uses `accept_broker_state`.
