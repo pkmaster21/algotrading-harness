@@ -132,6 +132,7 @@ class DataConfig(FrozenModel):
     # cache and the same holdout log wherever it is launched from.
     cache_dir: Path
     holdout_log: Path
+    paper_access_log: Path  # one line per profile per day that paper trading read past the cutoff
     # Fixed: fills use the open, and IEX-only OHLC is not the consolidated open.
     feed: Literal["sip"]
     adjustment: Literal["all"]  # splits and dividends
@@ -258,7 +259,10 @@ class Recipe(FrozenModel):
 
 _FIXED_SECTIONS = ("dates", "costs", "construction", "backtest", "data")
 # Paths resolved against the project root, per section.
-_PATH_FIELDS = {"data": ("cache_dir", "holdout_log"), "backtest": ("output_dir",)}
+_PATH_FIELDS = {
+    "data": ("cache_dir", "holdout_log", "paper_access_log"),
+    "backtest": ("output_dir",),
+}
 
 # config/ sits at the project root, next to harness/.
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"

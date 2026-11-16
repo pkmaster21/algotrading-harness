@@ -154,6 +154,7 @@ def test_relative_data_paths_resolve_against_project_root(
     root = config_copy.resolve().parent
     assert recipe.data.cache_dir == root / "data" / "bars"
     assert recipe.data.holdout_log == root / "backtests" / "holdout_log.csv"
+    assert recipe.data.paper_access_log == root / "state" / "paper" / "data_access_log.csv"
 
 
 def test_absolute_data_paths_kept(config_copy: Path, tmp_path: Path) -> None:

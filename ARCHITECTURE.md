@@ -35,7 +35,7 @@ reconciliation, and a clock-driven runner around the broker.
 |---|---|---|
 | `harness/models.py` | Shared data shapes: Bar, Stock, OptionContract, Leg, Signal, Fill, Position | 1 |
 | `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models | 1 |
-| `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff | 1 |
+| `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff. Two ways past it, each with its own log: `HoldoutAccess` (a holdout backtest) and `PaperAccess` (paper trading a frozen profile) | 1 |
 | `harness/ratelimit.py` | Request rate limiter shared by the data loader and the venue adapter | 2 |
 | `harness/orders.py` | Order manager core: staging, deterministic order ids, duplicate-free submission (write-ahead journal, lookup before resend), venue states into ledger fills, cancel with confirmation, recovery after a restart. Implements `Broker` for paper trading: `on_session_open` runs the open (auction exits, entries released against the actual account after the open, deadlines), with optional manual approval of entries | 2 |
 | `harness/inbox.py` | How another process hands the runner a control command: one file per command, written whole, removed once handled. Approve and reject so far | 2 |
@@ -205,6 +205,12 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   after the holdout start without the holdout flag, and filters cached rows on read, so
   holdout rows already on disk from an earlier holdout run are never returned. The holdout
   log line is written before any holdout data is read.
+- **Paper trading has its own way past the cutoff:** it must read yesterday's close every
+  day, which would flood the holdout log if it used `HoldoutAccess`. `PaperAccess` lifts
+  the cutoff for a frozen profile id and writes one line per profile per day to a separate
+  paper access log, before any bar is fetched. The holdout log stays a short list of
+  deliberate holdout runs. The two cannot be combined, an ordinary load is unchanged, and
+  only the paper runner may build a `PaperAccess` (a test fails if other harness code does).
 - **Holdout runs start fresh capital at the holdout start:** in-sample bars are warm-up only.
   The run entry point converts the holdout start into a session index for the engine, so the
   engine still never compares dates. During warm-up the engine fills the view but does not
