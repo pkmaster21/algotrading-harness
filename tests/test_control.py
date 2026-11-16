@@ -15,7 +15,7 @@ import pytest
 
 import harness.control as control
 import harness.service as service
-from harness.broker.venue import KillSwitchEngaged, VenueOrder
+from harness.broker.venue import KillSwitchEngaged, VenueDataError, VenueOrder
 from harness.control import ControlError
 from harness.killswitch import KillSwitch, kill
 from harness.orders import OrderManagerError, SessionIncomplete
@@ -391,13 +391,39 @@ def test_engaging_with_keys_for_another_account_sets_the_latch_and_cancels_nothi
 ) -> None:
     rig, _ = holding_spy(tmp_path)
     account = rig.venue.account().model_copy(update={"account_id": "OTHER"})
-    monkeypatch.setattr(rig.venue, "verify_account", lambda: account)
+    monkeypatch.setattr(rig.venue, "account", lambda: account)
     calls = len(rig.venue.calls)
     state = control.engage_kill_switch("stop", ME, **kw(rig))
     assert state.engaged and not state.cancel_confirmed
     assert rig.venue.calls[calls:] == []  # asked who it is (patched above), nothing else
     messages = " ".join(a.message for a in rig.alerts.alerts)
     assert "OTHER" in messages and "NOT canceled" in messages
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [{"trading_blocked": True}, {"no_shorting": False}, {"margin_multiplier": 2.0}],
+)
+def test_engaging_cancels_on_an_account_that_fails_the_setup_check(
+    tmp_path: Path, unsafe: dict[str, Any]
+) -> None:
+    rig, _ = holding_spy(tmp_path)
+    by_hand = VenueOrder(
+        client_order_id="by-hand-1", symbol="SPY", side="buy", quantity=1,
+        type="limit", limit_price=1.00, time_in_force="day",
+    )  # fmt: skip
+    rig.venue.place(by_hand)  # an order someone left open at the venue
+    for name, value in unsafe.items():
+        setattr(rig.venue, name, value)
+    with pytest.raises(VenueDataError):
+        rig.venue.verify_account()  # the gate for sending refuses this account
+    before = len(rig.venue.calls)
+    state = control.engage_kill_switch("stop everything", ME, **kw(rig))
+    # A kill is not sending: it cancels all the same.
+    assert state.engaged and state.cancel_confirmed and rig.venue.open_orders() == []
+    made = rig.venue.calls[before:]
+    assert ("cancel_all", "") in made and ("verify_account", "") not in made
+    assert [(a.severity, a.kind) for a in rig.alerts.alerts] == [("critical", "kill_switch")]
 
 
 def test_reset_needs_a_clean_reconciliation(tmp_path: Path) -> None:

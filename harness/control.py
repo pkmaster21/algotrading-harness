@@ -120,7 +120,9 @@ def engage_kill_switch(
 
     The latch is written first, before the venue is asked anything. Orders are canceled
     only if the keys are for the account the active profile was activated on; otherwise
-    the latch is set and the alert says nothing was canceled.
+    the latch is set and the alert says nothing was canceled. The account's setup is
+    not judged here (`verify_account` is for sending): an account that is blocked, or
+    that may short or borrow, still gets its open orders canceled.
     """
     _named(operator)
     if not reason.strip():
@@ -143,7 +145,10 @@ def engage_kill_switch(
             except ProfileError:
                 cfg = execution  # a profile that does not verify must not stop a cancel
             candidate = venue if venue is not None else _alpaca_venue(cfg, switch)
-            account = candidate.verify_account()
+            # Who the keys belong to, and nothing more. Not `verify_account`: a blocked
+            # account, or one whose settings are no longer the safe ones, must still
+            # get its open orders canceled. A cancel cannot make either worse.
+            account = candidate.account()
             if account.account_id != active.account_id:
                 raise ControlError(
                     f"the keys are for account {account.account_id}, not {active.account_id}"
