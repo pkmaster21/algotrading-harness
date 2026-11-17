@@ -91,6 +91,23 @@ backtest, a new profile, and a new activation with `--replace` on a flat account
 
 Times are New York time, from `config/execution.yaml`.
 
+```mermaid
+flowchart LR
+    start["Before 09:20<br/>start the runner<br/>harness.paper run<br/>decides on yesterday's close"]
+    approve["Until 09:20<br/>approve entries<br/>harness.cli pending / approve"]
+    t920["09:20<br/>approval deadline<br/>unapproved entries canceled"]
+    t925["09:25<br/>opening auction cutoff<br/>later exits go as market orders"]
+    t930["09:30<br/>market opens<br/>orders fill"]
+    t940["09:40<br/>unfilled auction exits<br/>re-sent as market orders"]
+    t950["09:50<br/>session deadline<br/>still working: canceled;<br/>runner exits"]
+    check["After<br/>harness.cli status<br/>complete, reconcile ok"]
+
+    start --> approve --> t920 --> t925 --> t930 --> t940 --> t950 --> check
+```
+
+Started after 09:20 with approval on, entries can no longer be approved that day.
+Started after 09:50 on a day not yet decided, nothing is decided (`late_start`).
+
 1. Start the runner before 09:20 if entries need approval, and in any case before 09:50:
    `uv run python -m harness.paper run`
    It decides on yesterday's close and trades today's open. Started after 09:50 on a day
@@ -129,6 +146,28 @@ Running the day a second time is safe: it reports `already_done` and sends nothi
 
 Engaged means nothing sends an order until an operator resets it. It cancels open
 orders; it never sells.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    Clear: Clear<br/>runner trades
+    Engaged: Engaged<br/>open orders canceled<br/>run reports killed
+    Flattening: Flattening<br/>sells only
+    Stuck: Stuck<br/>profile does not verify<br/>only kill works (issue 44)
+
+    [*] --> Clear
+    Clear --> Engaged: kill (operator)
+    Clear --> Engaged: runner, on a reconcile difference,<br/>unknown order, clock skew,<br/>unexpected error
+    Clear --> Flattening: flatten (engages the latch)
+    Engaged --> Flattening: flatten
+    Flattening --> Engaged: done, latch stays set
+    Engaged --> Engaged: accept / adjust<br/>(fix a difference)
+    Engaged --> Clear: reset-kill<br/>needs ledger = account,<br/>no open orders, no runner
+    Clear --> Stuck: runner, profile or<br/>strategy file fails to verify
+```
+
+Nothing goes from Engaged back to Clear without `reset-kill`, and nothing on this
+diagram buys. Only `flatten` sells.
 
 - Engage it yourself, at any time, also while the runner is running or hung:
   `uv run python -m harness.cli kill --reason "<why>" --operator <name>`
