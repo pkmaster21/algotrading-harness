@@ -1,0 +1,20 @@
+# ~100 US large-cap stocks (roughly the S&P 100 as of 2025), no ETFs.
+# Survivorship-biased: today's members applied to all history, so names that fell out
+# (or were acquired or delisted) are missing and backtests look better than reality.
+# Good for developing cross-sectional strategies; not evidence of an edge until it is
+# replaced by point-in-time index membership (ARCHITECTURE.md, Universe decision).
+# Names that listed after the data start (UBER 2019, PLTR 2020) have no bars before
+# their first session.
+symbols: [
+  AAPL, ABBV, ABT, ACN, ADBE, AIG, AMD, AMGN, AMT, AMZN,
+  AVGO, AXP, BA, BAC, BK, BKNG, BLK, BMY, BRK.B, C,
+  CAT, CHTR, CL, CMCSA, COF, COP, COST, CRM, CSCO, CVS,
+  CVX, DE, DHR, DIS, DUK, EMR, F, FDX, GD, GE,
+  GILD, GM, GOOGL, GS, HD, HON, IBM, INTC, INTU, ISRG,
+  JNJ, JPM, KO, LIN, LLY, LMT, LOW, MA, MCD, MDLZ,
+  MDT, MET, META, MMM, MO, MRK, MS, MSFT, NEE, NFLX,
+  NKE, NOW, NVDA, ORCL, PEP, PFE, PG, PLTR, PM, PYPL,
+  QCOM, RTX, SBUX, SCHW, SO, SPG, T, TGT, TMO, TMUS,
+  TSLA, TXN, UBER, UNH, UNP, UPS, USB, V, VZ, WFC,
+  WMT, XOM,
+]
