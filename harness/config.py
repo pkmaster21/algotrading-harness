@@ -9,7 +9,7 @@ Layout:
     config/
       strategies/<name>.yaml   strategy presets, picked per run (UI-editable later)
       risk/<name>.yaml         risk presets (hard limits), picked per run
-      universe/<name>.yaml     symbol lists, picked per run
+      universe/<name>.yaml     symbol lists or point-in-time membership, picked per run
       dates.yaml  costs.yaml  construction.yaml  backtest.yaml  data.yaml
                                fixed settings, shared by every run (changed through review)
       execution.yaml           fixed settings for sending orders to a venue (paper trading)
@@ -21,7 +21,9 @@ so editing a preset later never changes what an old run means.
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import hashlib
 import re
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -48,9 +50,123 @@ def _check_preset_name(name: str) -> str:
     return name
 
 
+class MembershipInterval(FrozenModel):
+    """One stretch of index membership: `start` is the first session in, `end` the first
+    session out (None: still a member)."""
+
+    symbol: str
+    start: dt.date
+    end: dt.date | None
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        Stock(symbol=self.symbol)  # validates ticker format
+        if self.end is not None and not self.start < self.end:
+            raise ValueError(f"{self.symbol}: membership start {self.start} not before end")
+        return self
+
+
+class Rename(FrozenModel):
+    """`old`'s interval ending on `date` and `new`'s interval starting on it are one company."""
+
+    old: str
+    new: str
+    date: dt.date
+
+
+class Correction(FrozenModel):
+    """A fix to one upstream membership row: replaced by (`new_start`, `new_end`), or
+    dropped when both are None."""
+
+    symbol: str
+    start: dt.date
+    end: dt.date | None
+    new_start: dt.date | None
+    new_end: dt.date | None
+    reason: str = Field(min_length=1)
+
+
+class BadBars(FrozenModel):
+    """A window in which the data source's bars for `symbol` are not real prices of the
+    member company (another security, or one stale price repeated): `start` inclusive,
+    `end` exclusive, None meaning unbounded. The engine treats bars in the window as
+    missing (docs/pit-universe-design.md)."""
+
+    symbol: str
+    start: dt.date | None
+    end: dt.date | None
+    reason: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        if self.start is not None and self.end is not None and not self.start < self.end:
+            raise ValueError(f"{self.symbol}: bad-bars start {self.start} not before end")
+        return self
+
+
+class SourceFile(FrozenModel):
+    name: str
+    sha256: str
+
+
+class Membership(FrozenModel):
+    """Point-in-time index membership, resolved: corrections then renames applied,
+    intervals that ended before the data start dropped, sorted by (symbol, start).
+
+    The source files are identified by name and sha256, so a run's recipe pins exactly
+    which membership it used. `corrections` and `renames` record what was applied; they
+    are not reapplied. `bad_bars` is applied later, to the bars.
+    """
+
+    file: SourceFile
+    corrections_file: SourceFile
+    renames_file: SourceFile
+    bad_bars_file: SourceFile
+    corrections: tuple[Correction, ...]
+    renames: tuple[Rename, ...]
+    bad_bars: tuple[BadBars, ...]
+    reviewed_multi_interval: tuple[str, ...]
+    intervals: tuple[MembershipInterval, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        symbols = set(self.symbols)
+        if unknown := sorted({b.symbol for b in self.bad_bars} - symbols):
+            raise ValueError(f"bad bars listed for tickers that are not members: {unknown}")
+        keys = [(iv.symbol, iv.start) for iv in self.intervals]
+        if keys != sorted(keys):
+            raise ValueError("membership intervals must be sorted by (symbol, start)")
+        counts: dict[str, int] = {}
+        for prev, cur in zip(self.intervals, self.intervals[1:], strict=False):
+            if prev.symbol == cur.symbol and (prev.end is None or prev.end > cur.start):
+                raise ValueError(f"{cur.symbol}: membership intervals overlap at {cur.start}")
+        for iv in self.intervals:
+            counts[iv.symbol] = counts.get(iv.symbol, 0) + 1
+        multi = {s for s, n in counts.items() if n > 1}
+        reviewed = set(self.reviewed_multi_interval)
+        if unreviewed := sorted(multi - reviewed):
+            raise ValueError(
+                f"tickers with more than one membership interval need a review before use: "
+                f"{unreviewed}; check that the bars between intervals are the same company "
+                f"(or that the earlier one has none), then add them to reviewed_multi_interval"
+            )
+        if stale := sorted(reviewed - multi):
+            raise ValueError(f"reviewed_multi_interval lists single-interval tickers: {stale}")
+        return self
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        """Every ticker with an interval, sorted."""
+        return tuple(sorted({iv.symbol for iv in self.intervals}))
+
+
 class UniverseConfig(FrozenModel):
+    """A universe preset: a fixed symbol list, or point-in-time `membership`, whose
+    tickers are then the symbols."""
+
     name: str
     symbols: tuple[str, ...] = Field(min_length=1)
+    membership: Membership | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -59,6 +175,8 @@ class UniverseConfig(FrozenModel):
             Stock(symbol=s)  # validates ticker format
         if len(set(self.symbols)) != len(self.symbols):
             raise ValueError("universe contains duplicate symbols")
+        if self.membership is not None and self.symbols != self.membership.symbols:
+            raise ValueError("a membership universe's symbols are its membership tickers")
         return self
 
 
@@ -306,6 +424,183 @@ def _resolve_paths(section: dict[str, Any], keys: tuple[str, ...], root: Path) -
     return resolved
 
 
+_RawInterval = tuple[str, dt.date, dt.date | None]
+_MEMBERSHIP_HEADER = ["ticker", "start_date", "end_date"]
+_CORRECTIONS_HEADER = [
+    "ticker", "start_date", "end_date", "new_start_date", "new_end_date", "reason",
+]  # fmt: skip
+_RENAMES_HEADER = ["old", "new", "date", "note"]
+_BAD_BARS_HEADER = ["ticker", "from_date", "to_date", "reason"]
+# yaml key -> header of the CSV file it names
+_MEMBERSHIP_FILES = {
+    "file": _MEMBERSHIP_HEADER,
+    "corrections": _CORRECTIONS_HEADER,
+    "renames": _RENAMES_HEADER,
+    "bad_bars": _BAD_BARS_HEADER,
+}
+_MEMBERSHIP_KEYS = {*_MEMBERSHIP_FILES, "reviewed_multi_interval"}
+
+
+def _read_csv(path: Path, header: list[str]) -> list[list[str]]:
+    """Rows of a CSV file whose first line must be exactly `header`."""
+    if not path.is_file():
+        raise ConfigError(f"missing config file: {path}")
+    with path.open(newline="") as fh:
+        rows = list(csv.reader(fh))
+    if not rows or rows[0] != header:
+        raise ConfigError(f"{path}: the header must be {','.join(header)}")
+    for n, row in enumerate(rows[1:], start=2):
+        if len(row) != len(header):
+            raise ConfigError(f"{path} line {n}: expected {len(header)} fields, got {len(row)}")
+    return rows[1:]
+
+
+def _date(value: str, path: Path, line: int) -> dt.date:
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise ConfigError(f"{path} line {line}: {value!r} is not a YYYY-MM-DD date") from exc
+
+
+def _opt_date(value: str, path: Path, line: int) -> dt.date | None:
+    return _date(value, path, line) if value else None
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def apply_corrections(
+    intervals: list[_RawInterval], corrections: list[Correction]
+) -> list[_RawInterval]:
+    """Replace or drop upstream rows. Each correction must match exactly one row."""
+    fixed = list(intervals)
+    for c in corrections:
+        row = (c.symbol, c.start, c.end)
+        if fixed.count(row) != 1:
+            raise ValueError(
+                f"correction for {c.symbol} {c.start}..{c.end}: expected one matching row, "
+                f"found {fixed.count(row)}"
+            )
+        i = fixed.index(row)
+        if c.new_start is None and c.new_end is None:
+            del fixed[i]
+        elif c.new_start is None:
+            raise ValueError(f"correction for {c.symbol} {c.start}: a replacement needs a start")
+        else:
+            fixed[i] = (c.symbol, c.new_start, c.new_end)
+    return fixed
+
+
+def apply_renames(intervals: list[_RawInterval], renames: list[Rename]) -> list[_RawInterval]:
+    """Join each rename chain into one interval under its last ticker.
+
+    A rename links the interval of `old` that ends on `date` to the interval of `new` that
+    starts on it; each must exist exactly once, and an interval links at most once each
+    way. Intervals not in any rename are returned unchanged.
+    """
+    nxt: dict[int, int] = {}
+    prv: dict[int, int] = {}
+    for r in renames:
+        olds = [i for i, (s, _, end) in enumerate(intervals) if s == r.old and end == r.date]
+        news = [i for i, (s, start, _) in enumerate(intervals) if s == r.new and start == r.date]
+        if len(olds) != 1 or len(news) != 1:
+            raise ValueError(
+                f"rename {r.old} -> {r.new} on {r.date}: expected one {r.old} interval ending "
+                f"and one {r.new} interval starting that day, found {len(olds)} and {len(news)}"
+            )
+        if olds[0] in nxt or news[0] in prv:
+            raise ValueError(f"rename {r.old} -> {r.new} on {r.date}: interval already renamed")
+        nxt[olds[0]], prv[news[0]] = news[0], olds[0]
+    joined: list[_RawInterval] = []
+    for i, (_, start, _) in enumerate(intervals):
+        if i in prv:
+            continue  # not the head of a chain
+        last = i
+        while last in nxt:
+            last = nxt[last]
+        joined.append((intervals[last][0], start, intervals[last][2]))
+    return joined
+
+
+def _resolve_membership(
+    universe_dir: Path, raw: dict[str, Any], data_start: dt.date
+) -> dict[str, Any]:
+    """A point-in-time universe preset resolved into `UniverseConfig` fields.
+
+    Order: upstream rows, then corrections (upstream errors), then renames, then intervals
+    that ended before the data start are dropped. Bad-bar windows are only recorded here.
+    """
+    name = raw["name"]
+    if set(raw) != {"name", "membership"}:
+        raise ConfigError(f"universe/{name}.yaml: a membership universe sets only 'membership'")
+    spec = raw["membership"]
+    if not isinstance(spec, dict) or set(spec) != _MEMBERSHIP_KEYS:
+        raise ConfigError(
+            f"universe/{name}.yaml: membership needs exactly {sorted(_MEMBERSHIP_KEYS)}"
+        )
+    paths: dict[str, Path] = {}
+    rows: dict[str, list[list[str]]] = {}
+    for key, header in _MEMBERSHIP_FILES.items():
+        value = spec[key]
+        if not isinstance(value, str) or Path(value).name != value or not value.endswith(".csv"):
+            raise ConfigError(f"universe/{name}.yaml: {key} must be a .csv file name in universe/")
+        paths[key] = universe_dir / value
+        rows[key] = _read_csv(paths[key], header)
+
+    def parsed(key: str) -> list[tuple[int, list[str]]]:
+        return list(enumerate(rows[key], start=2))
+
+    p = paths["file"]
+    intervals = [(t, _date(a, p, n), _opt_date(b, p, n)) for n, (t, a, b) in parsed("file")]
+    p = paths["corrections"]
+    corrections = [
+        Correction(
+            symbol=t,
+            start=_date(a, p, n),
+            end=_opt_date(b, p, n),
+            new_start=_opt_date(na, p, n),
+            new_end=_opt_date(nb, p, n),
+            reason=why,
+        )
+        for n, (t, a, b, na, nb, why) in parsed("corrections")
+    ]
+    p = paths["renames"]
+    renames = [Rename(old=o, new=w, date=_date(d, p, n)) for n, (o, w, d, _) in parsed("renames")]
+    p = paths["bad_bars"]
+    bad_bars = [
+        {"symbol": t, "start": _opt_date(a, p, n), "end": _opt_date(b, p, n), "reason": why}
+        for n, (t, a, b, why) in parsed("bad_bars")
+    ]
+    try:
+        fixed = apply_corrections(intervals, corrections)
+    except ValueError as exc:
+        raise ConfigError(f"{paths['corrections']}: {exc}") from exc
+    try:
+        joined = apply_renames(fixed, renames)
+    except ValueError as exc:
+        raise ConfigError(f"{paths['renames']}: {exc}") from exc
+
+    # Tickers that left before the data starts are dropped before validation, so the
+    # older rows (unused, sometimes odd tickers) never have to pass it.
+    kept = sorted(
+        (iv for iv in joined if iv[2] is None or iv[2] > data_start), key=lambda iv: iv[:2]
+    )
+    membership = {
+        "file": {"name": spec["file"], "sha256": _sha256(paths["file"])},
+        "corrections_file": {"name": spec["corrections"], "sha256": _sha256(paths["corrections"])},
+        "renames_file": {"name": spec["renames"], "sha256": _sha256(paths["renames"])},
+        "bad_bars_file": {"name": spec["bad_bars"], "sha256": _sha256(paths["bad_bars"])},
+        "corrections": [c.model_dump() for c in corrections],
+        "renames": [r.model_dump() for r in renames],
+        "bad_bars": bad_bars,
+        "reviewed_multi_interval": spec["reviewed_multi_interval"],
+        "intervals": [{"symbol": s, "start": a, "end": b} for s, a, b in kept],
+    }
+    symbols = sorted({iv[0] for iv in kept})
+    return {"name": name, "symbols": symbols, "membership": membership}
+
+
 def load_execution(config_dir: Path = DEFAULT_CONFIG_DIR) -> ExecutionConfig:
     """The fixed execution settings in `config_dir`/execution.yaml."""
     config_dir = config_dir.resolve()
@@ -341,6 +636,12 @@ def load_recipe(
     }
     for section in _FIXED_SECTIONS:
         raw[section] = _read_yaml(config_dir / f"{section}.yaml")
+    if "membership" in raw["universe"]:
+        try:
+            data_start = DateConfig.model_validate(raw["dates"]).data_start
+        except ValidationError as exc:
+            raise ConfigError(f"invalid config in {config_dir / 'dates.yaml'}:\n{exc}") from exc
+        raw["universe"] = _resolve_membership(config_dir / "universe", raw["universe"], data_start)
     for section, keys in _PATH_FIELDS.items():
         raw[section] = _resolve_paths(raw[section], keys, config_dir.parent)
     execution: ExecutionConfig | None = None

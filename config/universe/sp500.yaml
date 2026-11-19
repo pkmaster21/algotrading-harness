@@ -1,0 +1,11 @@
+# S&P 500, point in time: a symbol is in the universe only while it was in the index.
+# Membership, corrections, renames and bad-bar windows are pinned files in this folder;
+# see sp500-membership.md for the source, the reviews behind each file, and known issues.
+membership:
+  file: sp500-membership.csv
+  corrections: sp500-corrections.csv
+  renames: sp500-renames.csv
+  bad_bars: sp500-bad-bars.csv
+  # Tickers with more than one membership interval in the data range, after corrections
+  # and renames, each checked by hand (sp500-membership.md). A new one fails the load.
+  reviewed_multi_interval: [DOW, DXC, EQT, FSLR, KDP, PCG, SNDK]

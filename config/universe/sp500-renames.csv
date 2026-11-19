@@ -1,0 +1,29 @@
+old,new,date,note
+DD,DWDP,2017-09-01,DuPont merged with Dow into DowDuPont; Alpaca files the history under DD
+HRS,LHX,2019-06-01,Harris merged with L3 as L3Harris
+DWDP,DD,2019-06-03,DowDuPont renamed DuPont after the Dow and Corteva spin-offs
+TMK,GL,2019-08-08,Torchmark renamed Globe Life
+BHGE,BKR,2019-10-18,Baker Hughes a GE company renamed Baker Hughes
+HCP,PEAK,2019-11-05,HCP renamed Healthpeak; Alpaca files the history under DOC
+SYMC,NLOK,2019-11-05,Symantec renamed NortonLifeLock; Alpaca files the history under GEN
+BBT,TFC,2019-12-09,BB&T renamed Truist; Alpaca's BBT is a different security
+JEC,J,2019-12-10,Jacobs Engineering ticker change
+UTX,RTX,2020-04-03,United Technologies merged with Raytheon as RTX
+CTL,LUMN,2020-09-18,CenturyLink renamed Lumen
+WLTW,WTW,2022-01-10,Willis Towers Watson ticker change
+BLL,BALL,2022-05-10,Ball Corporation ticker change
+FB,META,2022-06-09,Facebook renamed Meta; Alpaca's FB is a different security from 2025
+ANTM,ELV,2022-06-28,Anthem renamed Elevance Health
+NLOK,GEN,2022-11-08,NortonLifeLock renamed Gen Digital
+PKI,RVTY,2023-05-16,PerkinElmer renamed Revvity
+FISV,FI,2023-06-07,Fiserv ticker change; Alpaca files the history under FISV
+RE,EG,2023-07-10,Everest Re renamed Everest Group
+ABC,COR,2023-08-30,AmerisourceBergen renamed Cencora
+PEAK,DOC,2024-03-04,Healthpeak took the DOC ticker after merging with Physicians Realty
+FLT,CPAY,2024-03-25,Fleetcor renamed Corpay
+WRK,SW,2024-07-08,WestRock combined with Smurfit Kappa as Smurfit WestRock
+FI,FISV,2025-11-11,Fiserv moved back to the FISV ticker
+MMC,MRSH,2026-01-14,Marsh McLennan ticker change
+BK,BNY,2026-05-21,Bank of New York Mellon ticker change; BNY holds BK's history (return correlation 0.999)
+SATS,ECHO,2026-06-24,EchoStar ticker change; ECHO holds SATS's history (return correlation 1.000)
+EQR,VMRK,2026-08-18,Equity Residential's line continues as VMRK; VMRK holds EQR's history (return correlation 1.000)

@@ -322,6 +322,16 @@ def run_backtest(
     holds them, but trading and the equity curve start at the first holdout session,
     with fresh capital.
     """
+    if recipe.universe.membership is not None:
+        # Until the engine enforces membership (entries for members only, forced exits on
+        # removal, masked views), such a run would trade every ticker that was ever a
+        # member: worse than survivorship bias, not better. Code that calls the engine
+        # directly (research scripts) is not covered: until then, do not hand it
+        # `recipe.universe.symbols` from a membership universe.
+        raise ConfigError(
+            f"universe {recipe.universe.name!r} is point-in-time; backtests cannot use it "
+            "until the engine enforces membership (docs/pit-universe-design.md, PR 2)"
+        )
     strategy = build_strategy(recipe)  # fails before any data is touched
     started = now().astimezone(dt.UTC)
     timestamp = started.strftime("%Y%m%dT%H%M%SZ")
