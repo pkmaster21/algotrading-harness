@@ -11,7 +11,7 @@ import datetime as dt
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 
-from harness.models import AccountState, Order, OrderUpdate, OrderUpdateReason
+from harness.models import AccountState, ForcedReason, Order, OrderUpdate, OrderUpdateReason
 
 
 class LookAheadError(RuntimeError):
@@ -44,12 +44,21 @@ class Broker(ABC):
 
     @abstractmethod
     def force_close(
-        self, symbol: str, price: float, price_date: dt.date, session: dt.date
+        self,
+        symbol: str,
+        price: float,
+        price_date: dt.date,
+        session: dt.date,
+        *,
+        reason: ForcedReason,
     ) -> str | None:
         """Close the whole position in `symbol` at a stale `price` from `price_date`.
 
-        Used when a held symbol has stopped trading (delisted or long halt). Returns the
-        order id; the fill is reported through `poll_updates`.
+        Used when a held symbol cannot be sold at a real price: it has had no bar for
+        `max_missing_sessions` while still a member (`reason="no_data"`: delisted or a
+        long halt), or it left the universe's membership and has no bar on its first
+        session out (`reason="index_removal"`). Returns the order id; the fill, with
+        `forced_reason=reason`, is reported through `poll_updates`.
 
         A real venue cannot sell at a stale price, so a live broker returns None and
         leaves the position alone: it never invents a fill. The engine logs

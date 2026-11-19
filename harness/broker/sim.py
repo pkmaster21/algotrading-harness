@@ -12,6 +12,7 @@ from harness.costs import apply_costs
 from harness.models import (
     AccountState,
     Fill,
+    ForcedReason,
     Order,
     OrderUpdate,
     OrderUpdateReason,
@@ -88,7 +89,15 @@ class SimBroker(Broker):
             self._execute(order_id, order, session, opens.get(order.symbol))
         self._last_session = session
 
-    def force_close(self, symbol: str, price: float, price_date: dt.date, session: dt.date) -> str:
+    def force_close(
+        self,
+        symbol: str,
+        price: float,
+        price_date: dt.date,
+        session: dt.date,
+        *,
+        reason: ForcedReason,
+    ) -> str:
         position = self._positions.get(symbol)
         if position is None:
             raise ValueError(f"force_close: {symbol} is not held")
@@ -109,10 +118,11 @@ class SimBroker(Broker):
             price=cost.fill_price,
             slippage_cost=cost.slippage_cost,
             commission=cost.commission,
+            forced_reason=reason,
         )
         self._apply(fill)
         self._updates.append(
-            OrderUpdate(order_id=order_id, status="filled", fills=(fill,), reason="no_data")
+            OrderUpdate(order_id=order_id, status="filled", fills=(fill,), reason=reason)
         )
         return order_id
 
@@ -186,6 +196,7 @@ class SimBroker(Broker):
             price=cost.fill_price,
             slippage_cost=cost.slippage_cost,
             commission=cost.commission,
+            forced_reason=order.forced_reason,
         )
         self._apply(fill)
         self._updates.append(

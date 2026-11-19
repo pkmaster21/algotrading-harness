@@ -22,6 +22,9 @@ Side = Literal["buy", "sell"]
 Action = Literal["enter", "exit"]
 OptionRight = Literal["call", "put"]
 FillKind = Literal["next_open", "forced_close", "venue"]
+# Why the harness, not the strategy, closed a position: the symbol stopped trading while
+# still a member ("no_data"), or it left the universe's membership ("index_removal").
+ForcedReason = Literal["no_data", "index_removal"]
 # "filled" and the last three are terminal. "partially_filled" is not: more updates follow.
 OrderStatus = Literal["partially_filled", "filled", "canceled", "rejected", "expired"]
 OrderUpdateReason = Literal[
@@ -33,6 +36,7 @@ OrderUpdateReason = Literal[
     "insufficient_cash",
     "end_of_data",
     "no_data",
+    "index_removal",
     # live order management (slice 2); SimBroker never reports these
     "limit_not_reached",
     "broker_rejected",
@@ -51,6 +55,7 @@ EventKind = Literal[
     "entry_skipped_no_slot",
     "entry_skipped_no_cash",
     "entry_skipped_no_price",
+    "entry_skipped_not_member",
     "order_canceled",
     "order_reduced",
     "order_unfilled_end",
@@ -58,6 +63,7 @@ EventKind = Literal[
     "order_rejected",
     "order_expired",
     "position_closed_no_data",
+    "position_closed_index_removal",
     "position_stale_no_data",
     "risk_shrunk",
     "risk_rejected",
@@ -249,6 +255,9 @@ class Order(FrozenModel):
     `quantity` is in order units: shares for a one-leg stock order. Each leg trades
     `quantity * leg.ratio` units. `created_on` is the date of the bar whose close
     produced the signal; the order may only fill in a later session.
+
+    `forced_reason` is set by the engine on an exit it added itself (a held symbol leaving
+    the universe's membership), never from a strategy signal; its fills carry it.
     """
 
     created_on: dt.date
@@ -257,10 +266,13 @@ class Order(FrozenModel):
     quantity: int = Field(gt=0)
     strength: float | None = None
     reason: str = ""
+    forced_reason: ForcedReason | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Self:
         _check_strength(self.action, self.strength)
+        if self.forced_reason is not None and self.action != "exit":
+            raise ValueError("only exit orders can be forced")
         return self
 
     @property
@@ -291,6 +303,10 @@ class Fill(FrozenModel):
       is only known once that session's bar exists, and is computed in the report.
 
     `filled_at` is set for `venue` fills only; simulated fills have no time of day.
+
+    `forced_reason` says why the harness closed the position: required on `forced_close`
+    fills, and set on the fill of an order the engine forced (an `index_removal` exit
+    filled at the next open). None on every fill of a strategy's own order.
     """
 
     order_id: str
@@ -306,9 +322,14 @@ class Fill(FrozenModel):
     slippage_cost: float = Field(ge=0)
     commission: float = Field(ge=0)
     filled_at: dt.datetime | None = None
+    forced_reason: ForcedReason | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Self:
+        if self.forced_reason is not None and self.side != "sell":
+            raise ValueError("only sells can be forced")
+        if self.kind == "forced_close" and self.forced_reason is None:
+            raise ValueError("forced_close fills need a forced_reason")
         if self.kind != "venue" and self.filled_at is not None:
             raise ValueError("filled_at is only for venue fills")
         if self.kind in ("next_open", "venue"):

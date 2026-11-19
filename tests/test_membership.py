@@ -1,11 +1,14 @@
-"""Point-in-time universe membership: loading, renames, validation (design PR 1)."""
+"""Point-in-time universe membership: loading, renames, validation (design PR 1), and
+backtests over a membership universe (PR 2)."""
 
 import csv
 import datetime as dt
 import hashlib
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from harness.config import (
@@ -14,9 +17,14 @@ from harness.config import (
     Recipe,
     Rename,
     apply_renames,
+    load_execution,
     load_recipe,
 )
-from harness.run import run_backtest
+from harness.data import BarPanel
+from harness.profiles import ProfileError, promote_run
+from harness.run import run_backtest, without_bad_bars
+from harness.view import PRICE_FIELDS
+from tests.synthetic import make_panel, sessions
 
 REPO_CONFIG = Path(__file__).resolve().parent.parent / "config"
 STRATEGY_PRESET = "strategy: buy_and_hold\nparams: {}\n"
@@ -85,6 +93,10 @@ def test_repo_sp500_loads_with_renames_applied(config_copy: Path) -> None:
     assert ("GEN", D(2003, 3, 31), None) in intervals(recipe)
     assert ("DOC", D(2008, 3, 31), None) in intervals(recipe)
     assert ("CPRI", D(2013, 11, 13), D(2020, 5, 12)) in intervals(recipe)
+    # Baker Hughes joins BKR from 2017-07-05, when the BHGE ticker began trading.
+    assert [(iv.start, iv.end) for iv in m.intervals if iv.symbol == "BKR"] == [
+        (D(2017, 7, 5), None)
+    ]
     assert {b.symbol for b in m.bad_bars} == {"ARNC", "CTRA", "DOW", "EXE", "PARA", "SMCI"}
     # Renames after the in-sample end are applied too (paper trading needs them).
     assert not symbols & {"BK", "SATS", "EQR"}
@@ -113,9 +125,114 @@ def test_recipe_round_trips_through_its_snapshot(config_copy: Path) -> None:
     assert Recipe.model_validate(recipe.model_dump(mode="json")) == recipe
 
 
-def test_backtests_refuse_a_membership_universe_until_enforced(config_copy: Path) -> None:
-    with pytest.raises(ConfigError, match="point-in-time"):
-        run_backtest(load(config_copy, "sp500"))
+# ------------------------------------------------------------------ backtests (PR 2)
+
+RUN_START = D(2016, 1, 4)
+RUN_N = 40
+
+
+class StubLoader:
+    """Synthetic bars for whatever symbols the run asks for; `missing` as in make_panel."""
+
+    def __init__(self, missing: dict[str, Sequence[int]] | None = None) -> None:
+        self.missing = missing or {}
+
+    def load(self, symbols: Sequence[str], *, holdout: object = None) -> BarPanel:
+        return make_panel(list(symbols), RUN_N, missing=self.missing, start=RUN_START)
+
+
+def _session(i: int) -> dt.date:
+    return sessions(RUN_N, RUN_START)[i]
+
+
+def _run_pit(config_dir: Path, symbol: str, loader: StubLoader) -> Path:
+    strategies = config_dir / "strategies"
+    (strategies / "hold.yaml").write_text(
+        f"strategy: example_buy_and_hold\nparams: {{symbol: {symbol}}}\n"
+    )
+    out = config_dir.parent / "runs"
+    backtest = config_dir / "backtest.yaml"
+    backtest.write_text(backtest.read_text().replace("output_dir: backtests", f"output_dir: {out}"))
+    recipe = load_recipe("hold", "t", config_dir)
+    summary = run_backtest(
+        recipe, loader=loader, now=lambda: dt.datetime(2026, 1, 1, tzinfo=dt.UTC),  # type: ignore[arg-type]
+        git_commit=lambda: None,
+    )  # fmt: skip
+    return Path(summary["run_dir"])
+
+
+def _trades(run_dir: Path) -> list[dict[str, str]]:
+    with (run_dir / "trades.csv").open() as f:
+        return list(csv.DictReader(f))
+
+
+def test_removal_shows_in_trades_csv(config_copy: Path) -> None:
+    write_universe(config_copy, f"AAA,{RUN_START},{_session(10)}\n")
+    (trade,) = _trades(_run_pit(config_copy, "AAA", StubLoader()))
+    assert (trade["exit_reason"], trade["exit_date"]) == ("index_removal", str(_session(10)))
+
+
+def test_a_point_in_time_run_cannot_be_promoted(config_copy: Path) -> None:
+    # The restart check and the paper runner do not enforce membership.
+    write_universe(config_copy, f"AAA,{RUN_START},\n")
+    run_dir = _run_pit(config_copy, "AAA", StubLoader())
+    with pytest.raises(ProfileError, match="point-in-time"):
+        promote_run(run_dir, "pit", execution=load_execution(config_copy))
+
+
+def test_rename_held_across_the_date_is_untouched(config_copy: Path) -> None:
+    write_universe(
+        config_copy,
+        f"OLD,{RUN_START},{_session(10)}\nNEW,{_session(10)},\n",
+        renames=f"OLD,NEW,{_session(10)},test\n",
+    )
+    (trade,) = _trades(_run_pit(config_copy, "NEW", StubLoader()))
+    assert (trade["exit_reason"], trade["is_open"]) == ("open", "True")
+
+
+def test_rename_chain_back_to_the_first_ticker_is_checked_under_it(config_copy: Path) -> None:
+    # AAA -> BBB -> AAA (like DD -> DWDP -> DD): both renames are checked against AAA.
+    write_universe(
+        config_copy,
+        f"AAA,{RUN_START},{_session(10)}\nBBB,{_session(10)},{_session(20)}\nAAA,{_session(20)},\n",
+        renames=f"AAA,BBB,{_session(10)},test\nBBB,AAA,{_session(20)},test\n",
+    )
+    (trade,) = _trades(_run_pit(config_copy, "AAA", StubLoader()))
+    assert trade["is_open"] == "True"
+
+
+def test_rename_whose_history_is_not_under_the_new_ticker_fails(config_copy: Path) -> None:
+    write_universe(
+        config_copy,
+        f"OLD,{RUN_START},{_session(10)}\nNEW,{_session(10)},\n",
+        renames=f"OLD,NEW,{_session(10)},test\n",
+    )
+    loader = StubLoader({"NEW": range(0, 9)})  # 1 of the 10 sessions before the rename
+    with pytest.raises(ConfigError, match="NEW has bars for 1 of the 10 sessions"):
+        _run_pit(config_copy, "NEW", loader)
+
+
+def test_bad_bars_are_removed_for_the_whole_run(config_copy: Path) -> None:
+    write_universe(
+        config_copy,
+        f"AAA,{RUN_START},\nBBB,{RUN_START},\n",
+        bad_bars=f"AAA,{_session(10)},{_session(20)},not AAA\n",
+    )
+    recipe = load(config_copy)
+    assert recipe.universe.membership is not None
+    panel = make_panel(["AAA", "BBB", "SPY"], RUN_N, start=RUN_START)
+    clean = without_bad_bars(panel, recipe.universe.membership)
+    for field in PRICE_FIELDS:
+        aaa = clean.field(field)[:, clean.column("AAA")]
+        assert np.isnan(aaa[10:20]).all()
+        np.testing.assert_array_equal(aaa[:10], panel.field(field)[:10, panel.column("AAA")])
+        np.testing.assert_array_equal(aaa[20:], panel.field(field)[20:, panel.column("AAA")])
+        np.testing.assert_array_equal(clean.field(field)[:, 1:], panel.field(field)[:, 1:])
+    # A held AAA loses its bars inside the window: the no-data rule closes it, and
+    # buy-and-hold buys it again once real bars return.
+    first, again = _trades(_run_pit(config_copy, "AAA", StubLoader()))
+    assert (first["exit_reason"], first["exit_date"]) == ("no_data", str(_session(14)))
+    assert again["entry_date"] == str(_session(21))
 
 
 def test_static_universes_are_unchanged(config_copy: Path) -> None:

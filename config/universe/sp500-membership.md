@@ -39,6 +39,12 @@ Fixes to upstream rows, applied before renames; each must match one upstream row
   three years. They are one company, and Alpaca's `KORS` and `CPRI` bars are identical over
   682 sessions, so a strategy could buy it twice. Corrected to one `CPRI` interval from
   2013-11-13 to 2020-05-12.
+- `BHGE`: upstream lists Baker Hughes under `BHGE` from 1996-01-02, but that ticker began
+  trading on 2017-07-05 with the GE merger. Old Baker Hughes is a separate `BHI` series on
+  Alpaca (378 sessions to 2017-07-03, history that `BKR` does not hold), found by the rename
+  coverage check every backtest runs. Corrected to start on 2017-07-05. Baker Hughes's
+  membership from 2016-01-04 to 2017-07-03 is therefore missing (it had no bars under
+  `BHGE` or `BKR` before either); adding it as `BHI` needs corrections that can add rows.
 
 ## `sp500-renames.csv`
 
@@ -96,14 +102,16 @@ to join:
 | 2022-04-11 | DISCA | WBD | Discovery became Warner Bros. Discovery |
 | 2024-02-01 | CDAY | DAY | Ceridian renamed Dayforce |
 
-Side effects, once PR 2 enforces membership: a position held across one of these dates is
-force-exited under the old ticker and can be re-entered under the new one, paying costs
-twice (7 events in 10 years). In 6 of the 7 the old ticker has no bar on the change day
+Side effects of enforcing membership: a position held across one of these dates is
+force-exited under the old ticker (`exit_reason=index_removal`) and can be re-entered
+under the new one, paying costs twice (7 events in 10 years). In 6 of the 7 the old ticker has no bar on the change day
 (CBS last bar 2019-12-04, COG 2021-10-01, DISCA 2022-04-08, MYL 2020-11-16, CDAY
 2024-01-31; ARNC is marked bad from 2020-04-01), and the same holds for VIAC (last bar
 2022-02-16, removed 2022-02-17 into the bad `PARA` bars). Those exits get no fill at a real
-open and fall to the no-data rule (closed after 5 sessions at the last close). Only LB's
-bars continue. PR 2 decides how these exits fill (for example, at the new ticker's open).
+open, so the engine closes them at the close of the first day out at the old ticker's last
+close minus slippage (design decision 6; the successor's open was rejected because
+dividend adjustment scales its early prices down). Only LB's bars continue, and LB exits
+at its own open.
 
 The script that builds the table is in the PR description (it reads a bar cache filled by
 `DataLoader`); rerun it on every membership update.
@@ -111,7 +119,7 @@ The script that builds the table is in the PR description (it reads a bar cache 
 ## `sp500-bad-bars.csv`
 
 Windows in which Alpaca's bars for a member ticker are not real prices of the member
-company: another security, or one stale price repeated. PR 2 treats
+company: another security, or one stale price repeated. Backtests treat
 bars in a window as missing, for the strategy's view and for the engine alike, so they are
 never ranked, traded or used as a fill price; the coverage report counts the member
 sessions they remove.

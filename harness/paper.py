@@ -501,6 +501,13 @@ class _Day:
                 f"profile {self.profile_id} is not the active profile (active: {current}); "
                 "activate it first"
             )
+        if profile.recipe.universe.membership is not None:
+            # Promotion refuses these; a profile that has one anyway is not traded, because
+            # this runner does not enforce membership (docs/pit-universe-design.md).
+            raise PaperError(
+                f"profile {self.profile_id} uses a point-in-time universe, which paper "
+                "trading does not support yet"
+            )
         frozen = profile.execution
         if (frozen.state_dir, frozen.profiles_dir) != (execution.state_dir, execution.profiles_dir):
             raise PaperError(

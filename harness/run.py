@@ -30,12 +30,14 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from pydantic import ValidationError
 
 from harness.broker.sim import SimBroker
-from harness.config import ConfigError, Recipe, load_recipe
+from harness.config import ConfigError, Membership, Recipe, load_recipe
 from harness.data import (
     PROJECT_ROOT,
+    BarPanel,
     DataError,
     DataLoader,
     HoldoutAccess,
@@ -45,6 +47,7 @@ from harness.data import (
 from harness.engine import simulate
 from harness.report import append_index, run_benchmark, write_run
 from harness.risk import RiskManager, RiskState
+from harness.view import PRICE_FIELDS, MemberMask
 from strategies.base import Strategy
 
 # Top-level modules a strategy may import, and harness modules it may import from.
@@ -307,6 +310,74 @@ def build_risk(recipe: Recipe) -> RiskManager | None:
     )
 
 
+# --------------------------------------------------------------------------- membership
+
+RENAME_MIN_COVERAGE = 0.95  # docs/pit-universe-design.md, decision 2
+
+
+def without_bad_bars(panel: BarPanel, membership: Membership) -> BarPanel:
+    """The panel with every bar inside a bad-bars window removed (NaN in every field), so
+    the strategy's view, fills and marks all treat those bars as missing."""
+    dates = np.array(panel.dates, dtype="datetime64[D]")
+    fields = {f: panel.field(f).copy() for f in PRICE_FIELDS}
+    for window in membership.bad_bars:
+        if window.symbol not in panel.symbols:
+            continue
+        rows = np.ones(len(dates), dtype=bool)
+        if window.start is not None:
+            rows &= dates >= np.datetime64(window.start, "D")
+        if window.end is not None:
+            rows &= dates < np.datetime64(window.end, "D")
+        j = panel.column(window.symbol)
+        for arr in fields.values():
+            arr[rows, j] = np.nan
+    return BarPanel(panel.dates, panel.symbols, fields)
+
+
+def check_rename_coverage(panel: BarPanel, membership: Membership) -> None:
+    """Fail unless each rename's surviving ticker has bars for the renamed company's
+    history: at least RENAME_MIN_COVERAGE of the panel sessions in its joined interval
+    before the rename date. Renames drop the old ticker's column, which is only right
+    when the data source files the whole history under the new one.
+    """
+    dates = panel.dates
+    problems: list[str] = []
+    for r in membership.renames:
+        final, on = r.new, r.date  # follow later renames: DD -> DWDP -> DD ends at DD
+        while nxt := min(
+            (x for x in membership.renames if x.old == final and x.date > on),
+            key=lambda x: x.date,
+            default=None,
+        ):
+            final, on = nxt.new, nxt.date
+        before = r.date - dt.timedelta(days=1)
+        joined = [
+            iv
+            for iv in membership.intervals
+            if iv.symbol == final and iv.start <= before and (iv.end is None or iv.end > before)
+        ]
+        if len(joined) != 1:
+            problems.append(f"{r.old} -> {r.new} on {r.date}: no {final} interval spans it")
+            continue
+        rows = [i for i, d in enumerate(dates) if joined[0].start <= d < r.date]
+        if not rows:
+            continue  # before the bars begin
+        if final not in panel.symbols:
+            problems.append(f"{r.old} -> {r.new} on {r.date}: {final} is not in the bars")
+            continue
+        have = int(np.count_nonzero(~np.isnan(panel.field("close")[rows, panel.column(final)])))
+        if have < RENAME_MIN_COVERAGE * len(rows):
+            problems.append(
+                f"{r.old} -> {r.new} on {r.date}: {final} has bars for {have} of the "
+                f"{len(rows)} sessions before the rename"
+            )
+    if problems:
+        raise ConfigError(
+            "renames whose history the bars do not hold under the new ticker "
+            "(sp500-renames.csv joins them into one column):\n  " + "\n  ".join(problems)
+        )
+
+
 def run_backtest(
     recipe: Recipe,
     *,
@@ -322,16 +393,6 @@ def run_backtest(
     holds them, but trading and the equity curve start at the first holdout session,
     with fresh capital.
     """
-    if recipe.universe.membership is not None:
-        # Until the engine enforces membership (entries for members only, forced exits on
-        # removal, masked views), such a run would trade every ticker that was ever a
-        # member: worse than survivorship bias, not better. Code that calls the engine
-        # directly (research scripts) is not covered: until then, do not hand it
-        # `recipe.universe.symbols` from a membership universe.
-        raise ConfigError(
-            f"universe {recipe.universe.name!r} is point-in-time; backtests cannot use it "
-            "until the engine enforces membership (docs/pit-universe-design.md, PR 2)"
-        )
     strategy = build_strategy(recipe)  # fails before any data is touched
     started = now().astimezone(dt.UTC)
     timestamp = started.strftime("%Y%m%dT%H%M%SZ")
@@ -365,6 +426,12 @@ def _run_reserved(
     loader = loader or DataLoader(recipe.dates, recipe.data)
     symbols = list(dict.fromkeys([*recipe.universe.symbols, recipe.backtest.benchmark]))
     panel = loader.load(symbols, holdout=access)
+    membership = recipe.universe.membership
+    members = None
+    if membership is not None:
+        panel = without_bad_bars(panel, membership)
+        check_rename_coverage(panel, membership)
+        members = MemberMask(recipe.universe.symbols, panel.dates, membership.intervals)
 
     trade_from = 0
     if holdout:
@@ -382,6 +449,7 @@ def _run_reserved(
         recipe.costs,
         trade_from,
         build_risk(recipe),
+        members,
     )
     benchmark = run_benchmark(panel, recipe, trade_from)
 

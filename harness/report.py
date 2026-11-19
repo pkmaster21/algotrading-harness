@@ -159,7 +159,7 @@ def trades_from_fills(
                     trade,
                     exit_date=fill.fill_date,
                     mark=None,
-                    exit_reason="no_data" if fill.kind == "forced_close" else "signal",
+                    exit_reason=fill.forced_reason or "signal",
                     session_index=session_index,
                     extra=extra,
                 )

@@ -124,6 +124,7 @@ def _fill(
         slippage_cost=0.0,
         commission=commission,
         filled_at=None if forced else dt.datetime.combine(date, dt.time(9, 31), MARKET_TZ),
+        forced_reason="no_data" if forced else None,
     )
 
 

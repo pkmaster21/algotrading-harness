@@ -13,10 +13,11 @@ import numpy as np
 import pytest
 
 from harness.broker.sim import SimBroker
+from harness.config import MembershipInterval
 from harness.data import BarPanel
 from harness.engine import simulate
 from harness.models import PortfolioSnapshot, Signal
-from harness.view import PRICE_FIELDS, BarBuffer, MarketView
+from harness.view import PRICE_FIELDS, BarBuffer, MarketView, MemberMask
 from strategies.base import Strategy
 from tests.synthetic import COSTS, construction, make_panel
 
@@ -24,9 +25,23 @@ SYMBOLS = ["SPY", "AAPL", "MSFT"]
 N = 40
 
 
-def _run(strategy: Strategy, panel: BarPanel | None = None):
+def _run(strategy: Strategy, panel: BarPanel | None = None, pit: bool = False):
+    """`pit`: a point-in-time universe in which AAPL leaves (and its bars are hidden from
+    then on) and MSFT joins late, so the membership paths run under every prophet."""
     panel = panel or make_panel(SYMBOLS, N)
-    return simulate(strategy, panel, SimBroker(10_000, COSTS), SYMBOLS, construction(), COSTS)
+    members = None
+    if pit:
+        d = panel.dates
+        intervals = [
+            MembershipInterval(symbol="SPY", start=d[0], end=None),
+            MembershipInterval(symbol="AAPL", start=d[0], end=d[15]),
+            MembershipInterval(symbol="MSFT", start=d[10], end=None),
+        ]
+        members = MemberMask(SYMBOLS, panel.dates, intervals)
+    return simulate(
+        strategy, panel, SimBroker(10_000, COSTS), SYMBOLS, construction(), COSTS, 0, None,
+        members,
+    )  # fmt: skip
 
 
 class OversizedLookback(Strategy):
@@ -90,6 +105,19 @@ class Mutator(Strategy):
         return []
 
 
+class MemberProphet(Strategy):
+    """Reads the buffer's membership rows after today, hoping to learn future joins."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_future: list[bool] = []
+
+    def on_bar(self, view: MarketView, portfolio: PortfolioSnapshot) -> Sequence[Signal]:
+        rows = view._buffer._enterable[view.n_bars :]  # deliberate misuse
+        self.seen_future.extend(rows[rows].tolist())
+        return []
+
+
 class Hoarder(Strategy):
     """Keeps every view it is given, then later checks whether old views grew."""
 
@@ -102,20 +130,28 @@ class Hoarder(Strategy):
         return []
 
 
-def test_history_never_extends_past_today() -> None:
+@pytest.mark.parametrize("pit", [False, True])
+def test_history_never_extends_past_today(pit: bool) -> None:
     strategy = OversizedLookback()
-    _run(strategy)
+    _run(strategy, pit=pit)
     assert len(strategy.last_dates) == N * len(PRICE_FIELDS)
     for today, last, rows, n_bars in strategy.last_dates:
         assert last == today
         assert rows == n_bars
 
 
-def test_future_rows_are_absent_from_the_buffer_itself() -> None:
+@pytest.mark.parametrize("pit", [False, True])
+def test_future_rows_are_absent_from_the_buffer_itself(pit: bool) -> None:
     strategy = InternalsProphet()
-    result = _run(strategy)
+    result = _run(strategy, pit=pit)
     assert strategy.seen_future == []  # every future row was still NaN when it looked
     assert result.fills == ()  # so the prophet never found a reason to trade
+
+
+def test_future_membership_is_absent_from_the_buffer() -> None:
+    strategy = MemberProphet()
+    _run(strategy, pit=True)
+    assert strategy.seen_future == []  # future membership rows were never written
 
 
 def test_buffer_never_shares_memory_with_the_full_panel() -> None:
@@ -142,9 +178,10 @@ def test_mutating_returned_data_does_not_change_later_sessions() -> None:
     assert len(result.equity) == N
 
 
-def test_retained_views_do_not_grow() -> None:
+@pytest.mark.parametrize("pit", [False, True])
+def test_retained_views_do_not_grow(pit: bool) -> None:
     strategy = Hoarder()
-    _run(strategy)
+    _run(strategy, pit=pit)
     for view, today, n_bars in strategy.views:
         assert view.today == today
         assert view.n_bars == n_bars
