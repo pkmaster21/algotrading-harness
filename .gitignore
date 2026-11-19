@@ -3,9 +3,10 @@
 .env.*
 !.env.example
 
-# Local data, run outputs, and paper trading state
+# Local data, run outputs, research notes, and paper trading state
 data/
 backtests/
+research/
 state/
 
 # Python

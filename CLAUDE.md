@@ -64,6 +64,7 @@ docs/         # detail docs (ui-design.md); entry-point docs stay at the root
 tests/        # pytest; test strategies (buy-and-hold, look-ahead cheater) live here
 data/         # local bar cache (gitignored)
 backtests/    # run outputs (gitignored)
+research/     # strategy research notes: pass cards, search scripts, trial logs (gitignored)
 ```
 
 ## Conventions
