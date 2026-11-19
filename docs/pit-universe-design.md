@@ -1,6 +1,7 @@
 # Point-in-time S&P 500 universe: design
 
-Status: proposed (2026-11-19), revised after the first review (forced exits, renames).
+Status: accepted (2026-11-19). Amended in PR 1 after its review: upstream corrections and
+bad-bar windows (decisions 8 and 9), and an auditable same-day review of renames.
 Resolves the open question "Data source for historical index membership" in
 `ARCHITECTURE.md` for backtests. Paper trading support is a later step with one hard
 requirement fixed here.
@@ -100,6 +101,19 @@ inflates most.
    none. The 6 removals with no bars anywhere (CCE, DOW, SNDK, STI, TE, WYND, all
    2016-2019) bias results slightly toward survivors; the number says how much.
 
+8. **Upstream errors are corrected in a reviewed file, not in the copy.**
+   `sp500-corrections.csv` replaces or drops upstream rows (each must match one row
+   exactly) before renames apply, so the pinned copy stays byte-identical to upstream. First
+   use: upstream lists Michael Kors under both `KORS` and `CPRI` for 2016-2018, two members
+   with identical bars.
+9. **Bars that are not real prices are marked, not guessed around.** `sp500-bad-bars.csv`
+   lists windows in which a member ticker's bars belong to a different security (`PARA`
+   throughout, `CTRA` before 2021-10-04, `ARNC` from 2020-04-01, `DOW` before 2019-04-02) or
+   repeat one stale price (`EXE`, `SMCI`). The engine treats bars in a
+   window as missing for the strategy's view, fills and marks alike, and the coverage report
+   counts the member sessions they remove. Masking after a ticker's last membership day
+   (decision 5) already covers reuse after leaving, so those need no row.
+
 ## What stays the same
 
 - Strategies still emit Signals only and never read files; the membership and rename files
@@ -122,8 +136,8 @@ inflates most.
 
 | # | PR | Files |
 |---|---|---|
-| 1 | `feat(config): point-in-time universe membership` | `config/universe/sp500-membership.{csv,md}` (source, commit, MIT notice, multi-interval review), `sp500-renames.csv`, `sp500.yaml`, `harness/config.py` (`Membership` model: intervals, renames applied, no overlaps, ticker format, reviewed multi-interval list), tests |
-| 2 | `feat(engine): enforce membership` | `harness/run.py` (member mask, symbols, rename coverage check against the bars), `harness/view.py` (`members()`, strategy-view masking after the last end), `harness/engine.py` (`entry_skipped_not_member`, forced `index_removal` exit), `harness/models.py` (event kind, exit reason), tests: boundary days, non-member entry dropped, forced exit fills at the first day out's real open, strategy exit merged, rename held across the date untouched, reused ticker hidden from the view, acquisition falls to the no-data rule, look-ahead and determinism suites with a membership universe |
+| 1 | `feat(config): point-in-time universe membership` | `config/universe/sp500-membership.{csv,md}` (source, commit, MIT notice, reviews, known issues), `sp500-corrections.csv`, `sp500-renames.csv`, `sp500-bad-bars.csv`, `sp500-same-day-review.csv` (audit, not read), `sp500.yaml`, `harness/config.py` (`Membership` model: corrections then renames applied, no overlaps, ticker format, reviewed multi-interval list, bad-bar windows recorded), tests |
+| 2 | `feat(engine): enforce membership` | `harness/run.py` (member mask, symbols, rename coverage check against the bars), `harness/view.py` (`members()`, strategy-view masking after the last end), bad-bar windows as missing bars for view, fills and marks, `harness/engine.py` (`entry_skipped_not_member`, forced `index_removal` exit), `harness/models.py` (event kind, exit reason), tests: boundary days, non-member entry dropped, forced exit fills at the first day out's real open, strategy exit merged, rename held across the date untouched, reused ticker hidden from the view, acquisition falls to the no-data rule, look-ahead and determinism suites with a membership universe. To decide here: how a forced exit fills when the old ticker has no bar on the change day, which is the case for 6 of the 7 same-company changes that stay split on Alpaca (CBS, COG, DISCA, MYL, CDAY, ARNC) and for VIAC; for example at the new ticker's open, from a reviewed successor list |
 | 3 | `feat(report): membership coverage and hash` | `harness/report.py` (summary fields, snapshot sha256), first full sp500 run, speed check, tests |
 | 4 | `docs: point-in-time universe` | `ARCHITECTURE.md` (decision log entry, open question resolved for backtests, components table), `CLAUDE.md` layout line, example strategy note |
 
