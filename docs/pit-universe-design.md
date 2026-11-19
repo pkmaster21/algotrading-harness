@@ -1,7 +1,9 @@
 # Point-in-time S&P 500 universe: design
 
 Status: accepted (2026-11-19). Amended in PR 1 after its review: upstream corrections and
-bad-bar windows (decisions 8 and 9), and an auditable same-day review of renames.
+bad-bar windows (decisions 8 and 9), and an auditable same-day review of renames. Amended
+in PR 2: how a removal exit fills when no bar follows (decision 6), what `members()`
+returns (decision 4), and how the rename check measures coverage (decision 2).
 Resolves the open question "Data source for historical index membership" in
 `ARCHITECTURE.md` for backtests. Paper trading support is a later step with one hard
 requirement fixed here.
@@ -53,9 +55,12 @@ inflates most.
    old and new intervals into one membership under the new ticker, and the old ticker's
    column is dropped, so a renamed company is one column for the whole run and a position
    held across the date is untouched (no sell and rebuy, no forced exit). This works
-   because Alpaca files the full history under the new ticker; PR 2 checks that for every
-   row (the new ticker must have bars for at least 95% of the old interval's sessions, or
-   the load fails). Chains map to the last ticker (FISV -> FI -> FISV is one company under
+   because Alpaca files the full history under the new ticker; every backtest checks that
+   for every row (the surviving ticker must have bars for at least 95% of the panel
+   sessions in the joined interval before the rename date, or the run fails). The check
+   found one upstream interval that predates its ticker: Baker Hughes under `BHGE` from
+   1996, while Alpaca has old Baker Hughes as a separate `BHI` series; a correction starts
+   `BHGE` on 2017-07-05. Chains map to the last ticker (FISV -> FI -> FISV is one company under
    FISV). Reports name the company by its later ticker throughout, which is anachronistic
    but unambiguous. The map is built once by the detection above (same-week addition,
    return correlation above 0.98) and then checked by hand; the detection script goes in
@@ -68,13 +73,20 @@ inflates most.
    ticker with an interval overlapping the run's dates.
 4. **The harness enforces membership on both sides.** The run builds a boolean member mask
    (sessions x symbols) once, from the panel dates. Then:
-   - `MarketView.members()` returns today's members, for ranking.
+   - `MarketView.members()` returns the symbols a strategy may enter today, for ranking:
+     today's members minus any whose last member session is today.
    - Entries: the engine drops entries for a symbol that is not a member on the signal
-     date and logs `entry_skipped_not_member`.
+     date, or whose last member session it is (the fill would come after it left), and
+     logs `entry_skipped_not_member`.
    - Exits: at the close of a held symbol's last member session, the engine adds an exit
      for it (`exit_reason=index_removal`), which fills at the next open, the first session
      out, like an index fund. A strategy exit for the same symbol that day is merged into
-     it. Exits are never blocked by risk checks, as today.
+     it. The exit goes through construction, so it frees its slot for that day's entries.
+     Exits are never blocked by risk checks, as today.
+   - `index_removal` means the ticker left the membership list, not always the company:
+     the 7 same-company ticker changes Alpaca keeps as two series (`sp500-membership.md`)
+     and VIAC, whose successor `PARA` has no usable bars, exit this way too. A strategy
+     that buys the new ticker back pays a round trip in costs (8 events in 10 years).
    - The argument is the same for both: a strategy that forgets to filter must not trade
      a survivor-only universe, and must not keep holding a name that left it.
    - Membership is known at the signal close: index changes are announced days before
@@ -91,11 +103,25 @@ inflates most.
    (SNDK, DOW), so nothing wrong is shown. PR 1 records that review in `sp500-membership.md`
    and fails the load if a future update adds a multi-interval ticker not on the reviewed
    list.
-6. **Acquisitions with no bar after removal.** When the target stops trading before the
-   first day out, the forced exit gets no bar and the existing rule applies: after 5
-   sessions without a bar the position is closed at its last close minus slippage
-   (`exit_reason=no_data`). That is close to the deal price for acquisitions and optimistic
-   for bankruptcies, as the decision log already says.
+6. **A removal with no bar on the first day out closes that day at the last close.** When
+   a removed ticker has no bar on its first session out, the removal exit is canceled at
+   the open (no bar), and at that session's close the engine closes the position at its
+   last close minus slippage (`force_close`, `exit_reason=index_removal`), without waiting
+   for the 5-session no-data rule. This covers acquisitions whose target stopped trading
+   before the first day out, a ticker halted that day, and 6 of the 7 split same-company
+   ticker changes plus VIAC (their old ticker's bars end before the change day).
+   - The price is the last member close, which for an acquisition is close to the deal
+     price and for a bankruptcy is optimistic, as the decision log already says.
+   - It misses one overnight move (where measurable: DISCA -1.4%, CDAY -0.2%). Filling at
+     the successor's open instead was rejected: Alpaca's bars are dividend-adjusted, so a
+     successor's early prices are scaled down by its later dividends (MYL to VTRS -23%,
+     COG to CTRA -20% on the change day), which would book losses that never happened.
+     Carrying the position over to the new ticker was rejected too: it needs a
+     corporate-action path in every broker for 8 events.
+   - The proceeds arrive at the close, so unlike a real open fill they cannot fund that
+     session's opening buys.
+   - The 5-session no-data rule now applies only to held symbols that lose their bars
+     while still members.
 7. **Missing bars are reported, not filled.** Each run's summary gets `membership_coverage`:
    member-sessions with a bar, as a share of all member-sessions, plus the tickers with
    none. The 6 removals with no bars anywhere (CCE, DOW, SNDK, STI, TE, WYND, all

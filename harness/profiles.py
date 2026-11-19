@@ -250,6 +250,15 @@ def promote_run(
     run_dir = Path(run_dir)
     snapshot = _read_snapshot(run_dir)
     recipe = _run_recipe(snapshot, run_dir)
+    if recipe.universe.membership is not None:
+        # The restart check below and the paper runner build the engine without the
+        # member mask or the bad-bars windows, so they would trade every ticker that was
+        # ever a member. Paper trading a point-in-time universe has its own design first.
+        raise ProfileError(
+            f"universe {recipe.universe.name!r} is point-in-time; it cannot be promoted "
+            "until paper trading supports membership (docs/pit-universe-design.md, "
+            "Paper trading)"
+        )
     if snapshot.get("holdout") is not False:
         raise ProfileError(
             "promote the in-sample run, not the holdout run; the holdout run of the same "

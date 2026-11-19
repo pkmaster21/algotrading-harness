@@ -37,6 +37,8 @@ def _fill(**overrides: object) -> Fill:
         slippage_cost=0.5,
         commission=0.0,
     )
+    if overrides.get("kind") == "forced_close":
+        base["forced_reason"] = "no_data"
     base.update(overrides)
     return Fill(**base)  # type: ignore[arg-type]
 
@@ -135,6 +137,22 @@ class TestOrder:
                 created_on=D1, action="exit", legs=(Leg(instrument=AAPL, side="sell"),), quantity=0
             )
 
+    def test_only_exits_can_be_forced(self) -> None:
+        sell = (Leg(instrument=AAPL, side="sell"),)
+        order = Order(
+            created_on=D1, action="exit", legs=sell, quantity=1, forced_reason="index_removal"
+        )
+        assert order.forced_reason == "index_removal"
+        with pytest.raises(ValidationError, match="only exit orders"):
+            Order(
+                created_on=D1,
+                action="enter",
+                legs=(Leg(instrument=AAPL, side="buy"),),
+                quantity=1,
+                strength=1.0,
+                forced_reason="index_removal",
+            )
+
 
 class TestFill:
     def test_next_open_fill_valid(self) -> None:
@@ -175,6 +193,21 @@ class TestFill:
         later = dt.date(2024, 1, 10)
         with pytest.raises(ValidationError):
             _fill(kind="forced_close", signal_date=later, fill_date=later, price_date=D1)
+
+    def test_forced_close_needs_a_reason(self) -> None:
+        later = dt.date(2024, 1, 10)
+        dates = dict(signal_date=later, fill_date=later, price_date=D1)
+        with pytest.raises(ValidationError, match="need a forced_reason"):
+            _fill(kind="forced_close", side="sell", forced_reason=None, **dates)
+        f = _fill(kind="forced_close", side="sell", forced_reason="index_removal", **dates)
+        assert f.forced_reason == "index_removal"
+
+    def test_a_forced_reason_on_a_next_open_fill_is_a_sell(self) -> None:
+        # The fill of an engine-forced exit order at the next open.
+        assert _fill(side="sell", forced_reason="index_removal").forced_reason == "index_removal"
+        assert _fill().forced_reason is None
+        with pytest.raises(ValidationError, match="only sells can be forced"):
+            _fill(forced_reason="index_removal")
 
     def test_simulated_fills_have_no_time_of_day(self) -> None:
         assert _fill().filled_at is None

@@ -9,6 +9,12 @@ returns is a copy, so mutating it cannot change what later sessions see.
 
 This stops buggy code, not deliberate introspection of the interpreter (for example walking
 the call stack to the engine). See ARCHITECTURE.md, decision log.
+
+A point-in-time universe adds a `MemberMask`: which symbols are index members on each
+session. The engine uses it to say which symbols a strategy may enter (`members()`), to
+force exits on removal, and to hide a symbol's bars from the strategy once it has left
+for good, so a ticker reused by another security is never seen
+(docs/pit-universe-design.md).
 """
 
 from __future__ import annotations
@@ -20,20 +26,98 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from harness.config import MembershipInterval
 from harness.models import Bar
 
 PriceField = Literal["open", "high", "low", "close", "volume"]
 PRICE_FIELDS: tuple[PriceField, ...] = ("open", "high", "low", "close", "volume")
 
 
+class MemberMask:
+    """Index membership on a fixed list of sessions, for a fixed list of symbols.
+
+    Built once per run from the membership intervals (start inclusive, end exclusive) and
+    the run's session dates. For each session it answers three questions, each as a
+    boolean row in symbol order:
+
+    - `members`: in the index that session.
+    - `leaving`: a member that session but not the next one in `dates`, so its last
+      member session is today. False on the last date, whose next session is unknown.
+    - `hidden`: on or after the end of the symbol's last interval. The strategy's view
+      shows no bars for it from then on. Bars before a symbol first joined, and between
+      two of its intervals, stay visible (that history was public).
+
+    A symbol with no interval is never a member and never hidden.
+    """
+
+    __slots__ = ("_symbols", "_pos", "_members", "_leaving", "_hidden")
+
+    def __init__(
+        self,
+        symbols: Sequence[str],
+        dates: Sequence[dt.date],
+        intervals: Sequence[MembershipInterval],
+    ) -> None:
+        self._symbols = tuple(symbols)
+        self._pos = {d: i for i, d in enumerate(dates)}
+        if len(self._pos) != len(dates):
+            raise ValueError("member mask dates must be unique")
+        column = {s: j for j, s in enumerate(self._symbols)}
+        stamps = np.array(dates, dtype="datetime64[D]")
+        shape = (len(dates), len(self._symbols))
+        members = np.zeros(shape, dtype=bool)
+        hidden = np.zeros(shape, dtype=bool)
+        last_end: dict[str, dt.date] = {}
+        still_member: set[str] = set()
+        for iv in intervals:
+            j = column.get(iv.symbol)
+            if j is None:
+                continue
+            inside = stamps >= np.datetime64(iv.start, "D")
+            if iv.end is None:
+                still_member.add(iv.symbol)
+            else:
+                inside &= stamps < np.datetime64(iv.end, "D")
+                last_end[iv.symbol] = max(iv.end, last_end.get(iv.symbol, iv.end))
+            members[:, j] |= inside
+        for symbol in sorted(last_end.keys() - still_member):
+            hidden[:, column[symbol]] = stamps >= np.datetime64(last_end[symbol], "D")
+        leaving = np.zeros(shape, dtype=bool)
+        leaving[:-1] = members[:-1] & ~members[1:]
+        for arr in (members, leaving, hidden):
+            arr.flags.writeable = False
+        self._members, self._leaving, self._hidden = members, leaving, hidden
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        return self._symbols
+
+    def _row(self, session: dt.date) -> int:
+        try:
+            return self._pos[session]
+        except KeyError:
+            raise KeyError(f"session {session} is not in the member mask") from None
+
+    def members(self, session: dt.date) -> np.ndarray:
+        return self._members[self._row(session)]
+
+    def leaving(self, session: dt.date) -> np.ndarray:
+        return self._leaving[self._row(session)]
+
+    def hidden(self, session: dt.date) -> np.ndarray:
+        return self._hidden[self._row(session)]
+
+
 class BarBuffer:
     """Engine-owned, append-only bar storage backing every MarketView.
 
     Arrays of shape (capacity, n_symbols) per field start as NaN. `append` copies in one
-    session's row; rows not yet appended stay NaN. Only the engine calls `append`.
+    session's row; rows not yet appended stay NaN. Only the engine calls `append`. Each
+    session also records which symbols a strategy may enter that day (`enterable`; all of
+    them unless the engine passes a row).
     """
 
-    __slots__ = ("_symbols", "_index", "_data", "_dates", "_stamps", "_length")
+    __slots__ = ("_symbols", "_index", "_data", "_enterable", "_dates", "_stamps", "_length")
 
     def __init__(self, symbols: Sequence[str], capacity: int) -> None:
         if capacity < 1:
@@ -44,6 +128,8 @@ class BarBuffer:
         self._data = {f: np.full((capacity, n), np.nan) for f in PRICE_FIELDS}
         for arr in self._data.values():
             arr.flags.writeable = False
+        self._enterable = np.zeros((capacity, n), dtype=bool)
+        self._enterable.flags.writeable = False
         self._dates: list[dt.date] = []
         self._stamps = np.full(capacity, np.datetime64("NaT", "ns"), dtype="datetime64[ns]")
         self._length = 0
@@ -56,8 +142,14 @@ class BarBuffer:
     def symbols(self) -> tuple[str, ...]:
         return self._symbols
 
-    def append(self, session: dt.date, row: Mapping[str, np.ndarray]) -> None:
-        """Copy in the bars for `session`, which must be later than the last appended one."""
+    def append(
+        self,
+        session: dt.date,
+        row: Mapping[str, np.ndarray],
+        enterable: np.ndarray | None = None,
+    ) -> None:
+        """Copy in the bars for `session`, which must be later than the last appended one,
+        and which symbols may be entered that session (default: all)."""
         if self._length == len(self._stamps):
             raise IndexError("BarBuffer is full")
         if self._dates and session <= self._dates[-1]:
@@ -71,6 +163,12 @@ class BarBuffer:
             arr.flags.writeable = True
             arr[i] = values
             arr.flags.writeable = False
+        allowed = np.ones(len(self._symbols), dtype=bool) if enterable is None else enterable
+        if allowed.shape != (len(self._symbols),) or allowed.dtype != np.bool_:
+            raise ValueError(f"enterable row has shape {allowed.shape}, dtype {allowed.dtype}")
+        self._enterable.flags.writeable = True
+        self._enterable[i] = allowed
+        self._enterable.flags.writeable = False
         self._dates.append(session)
         self._stamps[i] = np.datetime64(session, "ns")
         self._length += 1
@@ -130,6 +228,17 @@ class MarketView:
             return self._buffer._index[symbol]
         except KeyError:
             raise KeyError(f"symbol {symbol!r} is not in the universe") from None
+
+    def members(self) -> tuple[str, ...]:
+        """The symbols a strategy may enter today, in universe order: every symbol for a
+        fixed universe; for a point-in-time universe, today's index members minus any
+        whose last member session is today (an entry would fill after it left).
+
+        Entries for other symbols are dropped by the engine (`entry_skipped_not_member`).
+        Rank among these.
+        """
+        row = self._buffer._enterable[self._n - 1]
+        return tuple(s for s, ok in zip(self._buffer.symbols, row, strict=True) if ok)
 
     def bar(self, symbol: str) -> Bar | None:
         """Today's bar for `symbol`, or None if it has no bar today."""

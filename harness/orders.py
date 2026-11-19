@@ -71,6 +71,7 @@ from harness.models import (
     MARKET_TZ,
     AccountState,
     Fill,
+    ForcedReason,
     FrozenModel,
     Leg,
     Order,
@@ -934,13 +935,20 @@ class OrderManager(Broker):
         return self._ledger.account()
 
     def force_close(
-        self, symbol: str, price: float, price_date: dt.date, session: dt.date
+        self,
+        symbol: str,
+        price: float,
+        price_date: dt.date,
+        session: dt.date,
+        *,
+        reason: ForcedReason,
     ) -> str | None:
         """Never fabricates a fill. Alerts; reconciliation picks up what the venue did."""
+        why = "left the universe's membership and " if reason == "index_removal" else ""
         self._alert(
             "warn",
             "position_stale_no_data",
-            f"{symbol} has had no bar since {price_date}; the position is left alone",
+            f"{symbol} {why}has had no bar since {price_date}; the position is left alone",
         )
         return None
 
