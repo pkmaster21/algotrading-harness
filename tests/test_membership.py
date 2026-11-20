@@ -4,6 +4,7 @@ backtests over a membership universe (PR 2)."""
 import csv
 import datetime as dt
 import hashlib
+import json
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,8 +23,9 @@ from harness.config import (
 )
 from harness.data import BarPanel
 from harness.profiles import ProfileError, promote_run
+from harness.report import membership_report
 from harness.run import run_backtest, without_bad_bars
-from harness.view import PRICE_FIELDS
+from harness.view import PRICE_FIELDS, MemberMask
 from tests.synthetic import make_panel, sessions
 
 REPO_CONFIG = Path(__file__).resolve().parent.parent / "config"
@@ -468,3 +470,48 @@ def test_same_day_review_matches_the_rename_map() -> None:
     assert all(r["reason"] for r in review)
     marked = {(r["removed"], r["added"], r["date"]) for r in review if r["renamed"] == "yes"}
     assert marked == renames
+
+
+# ------------------------------------------------------------------ coverage report (PR 3)
+
+
+def test_summary_reports_membership_coverage_and_file_hashes(config_copy: Path) -> None:
+    # AAA: 40 member sessions, 10 lost to a bad-bars window. BBB: 20, 2 missing bars.
+    # CCC: 10, no bars at all (a removal the data source does not hold).
+    write_universe(
+        config_copy,
+        f"AAA,{RUN_START},\nBBB,{RUN_START},{_session(20)}\nCCC,{_session(5)},{_session(15)}\n",
+        bad_bars=f"AAA,{_session(10)},{_session(20)},not AAA\n",
+    )
+    loader = StubLoader({"BBB": [3, 30], "CCC": range(RUN_N)})  # BBB's 30 is after it left
+    run_dir = _run_pit(config_copy, "AAA", loader)
+    block = json.loads((run_dir / "summary.json").read_text())["membership"]
+    assert block["coverage"] == {
+        "member_sessions": 70,
+        "with_bar": 30 + 19 + 0,
+        "share": 49 / 70,
+        "bad_bar_sessions": 10,
+        "tickers_without_bars": ["CCC"],
+    }
+    u = config_copy / "universe"
+    assert block["files"] == {
+        name: hashlib.sha256((u / name).read_bytes()).hexdigest()
+        for name in ("t-members.csv", "t-corrections.csv", "t-renames.csv", "t-bad.csv")
+    }
+
+
+def test_coverage_counts_traded_sessions_only() -> None:
+    # Holdout warm-up is not traded, so its member-sessions do not count.
+    panel = make_panel(["AAA", "SPY"], 10, missing={"AAA": [1, 2, 7]})
+    m = Membership.model_validate(
+        {
+            **{k: {"name": k, "sha256": "0"} for k in
+               ("file", "corrections_file", "renames_file", "bad_bars_file")},
+            "corrections": [], "renames": [], "bad_bars": [], "reviewed_multi_interval": [],
+            "intervals": [{"symbol": "AAA", "start": panel.dates[0], "end": None}],
+        }
+    )  # fmt: skip
+    mask = MemberMask(["AAA"], panel.dates, m.intervals)
+    coverage = membership_report(m, mask, panel, panel, trade_from=5)["coverage"]
+    assert (coverage["member_sessions"], coverage["with_bar"]) == (5, 4)
+    assert coverage["bad_bar_sessions"] == 0
