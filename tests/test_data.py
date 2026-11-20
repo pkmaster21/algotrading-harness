@@ -12,7 +12,9 @@ import pandas as pd
 import pytest
 
 from harness.data import (
+    CACHE_SCHEMA_VERSION,
     AlpacaBarFetcher,
+    CacheMeta,
     DataError,
     DataLoader,
     HoldoutAccess,
@@ -111,6 +113,64 @@ def test_requests_are_batched(tmp_path: Path) -> None:
     fetcher = FakeFetcher()
     _loader(config, fetcher).load(["SPY", "AAPL", "MSFT", "NVDA", "XOM"])
     assert [len(r[0]) for r in fetcher.requests] == [2, 2, 1]
+
+
+class _DropsRenamed(FakeFetcher):
+    """Like Alpaca (issue #56): no bars for an old ticker when the ticker that now holds
+    its history is in the same request. Alone, or with others, it comes back complete."""
+
+    SUCCESSOR = {"SYMC": "GEN", "HCP": "DOC"}
+
+    def _bars(self, symbols, start, end, *, raw):  # type: ignore[no-untyped-def]
+        out = super()._bars(symbols, start, end, raw=raw)
+        for old, new in self.SUCCESSOR.items():
+            if old in out and new in symbols:
+                out[old] = out[old].iloc[0:0]
+        return out
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_symbol_empty_in_a_batch_is_refetched_alone(tmp_path: Path, raw: bool) -> None:
+    config = tmp_config(tmp_path)
+    loader = _loader(config, _DropsRenamed())
+    cutoff = loader.cutoff(None, None)
+    start, end = dt.date(2026, 1, 5), dt.date(2026, 1, 30)
+    batched = loader._fetch(["GEN", "SYMC", "SPY"], start, end, cutoff, raw=raw)
+    alone = _loader(config, FakeFetcher())._fetch(["SYMC"], start, end, cutoff, raw=raw)
+    assert len(alone["SYMC"]) == 20
+    pd.testing.assert_frame_equal(batched["SYMC"], alone["SYMC"])
+
+
+def test_batch_drop_does_not_reach_the_cache(tmp_path: Path) -> None:
+    config = tmp_config(tmp_path)
+    fetcher = _DropsRenamed()
+    panel = _loader(config, fetcher).load(["DOC", "HCP", "SPY"])
+    assert not np.isnan(panel.field("close")[:, panel.column("HCP")]).all()
+    assert [r[0] for r in fetcher.requests] == [("DOC", "HCP", "SPY"), ("HCP",)]
+
+
+def test_symbol_with_no_bars_costs_one_extra_request(tmp_path: Path) -> None:
+    config = tmp_config(tmp_path)
+    fetcher = FakeFetcher()
+    fetcher.delisted["GONE"] = dt.date(2000, 1, 3)
+    panel = _loader(config, fetcher).load(["SPY", "GONE"])
+    assert np.isnan(panel.field("close")[:, panel.column("GONE")]).all()
+    assert [r[0] for r in fetcher.requests] == [("SPY", "GONE"), ("GONE",)]
+    _loader(config, fetcher).load(["SPY", "GONE"])  # cached: no further requests
+    assert len(fetcher.requests) == 2
+
+
+def test_cache_from_an_older_schema_is_rebuilt(tmp_path: Path) -> None:
+    """A schema-1 cache may hold an empty series that issue #56 dropped."""
+    config = tmp_config(tmp_path)
+    loader = _loader(config, FakeFetcher())
+    loader.load(["SPY"])
+    meta = loader._cache.meta("SPY")
+    assert meta is not None and meta.schema_version == CACHE_SCHEMA_VERSION
+    stale = CacheMeta(**{**meta.model_dump(), "schema_version": CACHE_SCHEMA_VERSION - 1})
+    loader._cache.write("SPY", loader._cache._read_unfiltered("SPY").iloc[0:0], stale)
+    panel = _loader(config, FakeFetcher()).load(["SPY"])
+    assert not np.isnan(panel.field("close")[:, panel.column("SPY")]).any()
 
 
 def test_fetcher_returning_out_of_range_bars_is_rejected(tmp_path: Path) -> None:
