@@ -10,7 +10,8 @@ Alpaca's bars start on 2016-01-04, a year after `data_start`, so intervals in 20
 but have no bars. Every check below uses in-sample bars only (to 2026-03-31), fetched one
 symbol per request: in a multi-symbol request Alpaca returns no bars for an old ticker when
 the ticker that now holds its history is in the same request (GEN with SYMC, DOC with HCP,
-CPRI with KORS), so a batched cache can hide bars that exist.
+CPRI with KORS), so a batched cache could hide bars that exist. The loader now refetches
+alone any symbol a multi-symbol request returns empty (issue #56).
 
 ## `sp500-membership.csv`
 
@@ -181,10 +182,12 @@ below, and real events (FRC, SIVB, PCG, COVID March 2020, ...).
   before Alpaca's bars begin. (STI and TE have bars, but only after they left: reused
   tickers.) Their member sessions have no bars, a small survivor bias the run summary will
   report as coverage.
-- **Batched requests can drop an old ticker's bars** (top of this file): a harness data
-  bug, tracked in issue #56. It does not affect `sp500` today, because renamed-away tickers
-  are dropped before loading, but it can affect any universe that lists an old and a new
-  ticker together.
+- **Batched requests could drop a ticker's bars** (top of this file), fixed in issue #56.
+  It did affect `sp500`: a 50-per-request cache held no bars for DOW (2,575 alone) or CCE
+  (718 alone), although neither had its successor in the same request, so the trigger is
+  wider than an old and a new ticker together. The loader now refetches alone any symbol
+  that a multi-symbol request returns empty, and the cache schema version was bumped so
+  older caches are rebuilt.
 - Additions after 2026-03-31 (for example RDDT) have no in-sample bars; they matter only
   for holdout and paper runs.
 
