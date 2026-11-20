@@ -16,15 +16,16 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import yaml
 
 from harness.broker.sim import SimBroker
-from harness.config import ConstructionConfig, CostConfig, Recipe
+from harness.config import ConstructionConfig, CostConfig, Membership, Recipe
 from harness.data import BarPanel
 from harness.engine import BacktestResult, simulate
 from harness.models import Fill, PortfolioSnapshot, Signal
-from harness.view import MarketView
+from harness.view import MarketView, MemberMask
 from strategies.base import Strategy
 
 TRADE_COLUMNS = [
@@ -243,6 +244,59 @@ def _trade(
     }
 
 
+# --------------------------------------------------------------------------- membership
+
+
+def membership_report(
+    membership: Membership,
+    members: MemberMask,
+    raw: BarPanel,
+    panel: BarPanel,
+    trade_from: int,
+) -> dict[str, Any]:
+    """The `membership` block of a point-in-time run's summary (docs/pit-universe-design.md,
+    decisions 1, 7 and 9): the sha256 of each source file, and how many member-sessions
+    of the traded sessions (from `trade_from` on; warm-up is left out) have a bar.
+
+    `raw` is the panel as loaded and `panel` the one the engine ran on, with bad-bars
+    windows removed. A member-session has a bar when `panel` has a close for it;
+    `bad_bar_sessions` counts those that had one in `raw` but lost it to a bad-bars
+    window. `tickers_without_bars` lists members with no bar in any of their member
+    sessions, the removals the data source does not hold (a bias toward survivors).
+    """
+    cols = [panel.column(s) for s in members.symbols]
+    is_member = members.matrix[trade_from:]
+    has_bar = ~np.isnan(panel.field("close")[trade_from:, cols])
+    had_bar = ~np.isnan(raw.field("close")[trade_from:, [raw.column(s) for s in members.symbols]])
+    member_sessions = int(np.count_nonzero(is_member))
+    with_bar = int(np.count_nonzero(is_member & has_bar))
+    per_symbol_members = np.count_nonzero(is_member, axis=0)
+    per_symbol_bars = np.count_nonzero(is_member & has_bar, axis=0)
+    without = [
+        s
+        for s, n, b in zip(members.symbols, per_symbol_members, per_symbol_bars, strict=True)
+        if n > 0 and b == 0
+    ]
+    return {
+        "files": {
+            f.name: f.sha256
+            for f in (
+                membership.file,
+                membership.corrections_file,
+                membership.renames_file,
+                membership.bad_bars_file,
+            )
+        },
+        "coverage": {
+            "member_sessions": member_sessions,
+            "with_bar": with_bar,
+            "share": with_bar / member_sessions if member_sessions else None,
+            "bad_bar_sessions": int(np.count_nonzero(is_member & had_bar & ~has_bar)),
+            "tickers_without_bars": sorted(without),
+        },
+    }
+
+
 # --------------------------------------------------------------------------- metrics
 
 
@@ -273,7 +327,10 @@ def summarize(
     *,
     holdout: bool,
     trades: list[dict[str, Any]] | None = None,
+    membership: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """The run's summary.json. `membership` is `membership_report` for a point-in-time
+    universe, None for a fixed one."""
     # `harness.paper_report` calls this with `trades` and a result that has no `updates`
     # and no `final_positions`. Anything read from those here must be given to it too.
     trades = round_trips(result) if trades is None else trades
@@ -309,6 +366,7 @@ def summarize(
             **return_metrics(benchmark, rf),
         },
         "events": dict(sorted(events.items())),
+        "membership": dict(membership) if membership is not None else None,
         "data_fingerprint": result.data_fingerprint,
     }
 
@@ -352,6 +410,7 @@ def write_run(
     *,
     holdout: bool,
     run_info: Mapping[str, Any],
+    membership: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write every run file into `run_dir` and return the summary.
 
@@ -362,7 +421,9 @@ def write_run(
     if any(run_dir.iterdir()):
         raise FileExistsError(f"run folder {run_dir} already has files")
     trades = round_trips(result)
-    summary = summarize(result, benchmark, recipe, holdout=holdout, trades=trades)
+    summary = summarize(
+        result, benchmark, recipe, holdout=holdout, trades=trades, membership=membership
+    )
     _write_csv(run_dir / "trades.csv", TRADE_COLUMNS, trades)
     _write_csv(run_dir / "equity.csv", EQUITY_COLUMNS, [p.model_dump() for p in result.equity])
     _write_csv(run_dir / "events.csv", EVENT_COLUMNS, [e.model_dump() for e in result.events])

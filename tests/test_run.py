@@ -237,6 +237,7 @@ def test_example_strategy_end_to_end(tmp_path: Path) -> None:
     assert run_dir.name == "20260701T150000Z_example_buy_and_hold"
     assert summary["trade_count"] == 1 and summary["open_trades"] == 1
     assert summary["pct_time_invested"] > 0.99
+    assert summary["membership"] is None  # a fixed universe
     # With one slot, buying SPY and holding is the benchmark, so they match exactly.
     for key in ("total_return", "cagr", "max_drawdown", "sharpe"):
         assert summary[key] == summary["benchmark"][key]
