@@ -92,6 +92,11 @@ class MemberMask:
     def symbols(self) -> tuple[str, ...]:
         return self._symbols
 
+    @property
+    def matrix(self) -> np.ndarray:
+        """Read-only (n_dates, n_symbols) array: `members` for every session at once."""
+        return self._members
+
     def _row(self, session: dt.date) -> int:
         try:
             return self._pos[session]

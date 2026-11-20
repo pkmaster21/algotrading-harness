@@ -45,7 +45,7 @@ from harness.data import (
     PanelError,
 )
 from harness.engine import simulate
-from harness.report import append_index, run_benchmark, write_run
+from harness.report import append_index, membership_report, run_benchmark, write_run
 from harness.risk import RiskManager, RiskState
 from harness.view import PRICE_FIELDS, MemberMask
 from strategies.base import Strategy
@@ -428,6 +428,7 @@ def _run_reserved(
     panel = loader.load(symbols, holdout=access)
     membership = recipe.universe.membership
     members = None
+    raw = panel
     if membership is not None:
         panel = without_bad_bars(panel, membership)
         check_rename_coverage(panel, membership)
@@ -464,7 +465,14 @@ def _run_reserved(
         "git_commit": commit,
         "python": sys.version.split()[0],
     }
-    summary = write_run(run_dir, result, benchmark, recipe, holdout=holdout, run_info=run_info)
+    report = (
+        membership_report(membership, members, raw, panel, trade_from)
+        if membership is not None and members is not None
+        else None
+    )
+    summary = write_run(
+        run_dir, result, benchmark, recipe, holdout=holdout, run_info=run_info, membership=report
+    )
     append_index(run_dir.parent / "index.csv", summary, run_info["timestamp_utc"], run_dir)
     return {**summary, "run_dir": str(run_dir)}
 
