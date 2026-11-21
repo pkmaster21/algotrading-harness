@@ -180,8 +180,10 @@ below, and real events (FRC, SIVB, PCG, COVID March 2020, ...).
 - Removals since 2016 with no bars inside their interval: AABA, SNDK (old SanDisk), STI,
   TE, WYND, plus old Dow Chemical (bars marked bad) and every interval that ended in 2015,
   before Alpaca's bars begin. (STI and TE have bars, but only after they left: reused
-  tickers.) Their member sessions have no bars, a small survivor bias the run summary will
-  report as coverage.
+  tickers.) Their member sessions have no bars, a small survivor bias each run reports in
+  `summary.json` under `membership.coverage`. Its `tickers_without_bars` names AABA, PARA,
+  STI, TE and WYND instead: a ticker whose later company has bars (SNDK, DOW) only lowers
+  the share, and PARA is masked throughout (`docs/pit-universe-design.md`, decision 7).
 - **Batched requests could drop a ticker's bars** (top of this file), fixed in issue #56.
   It did affect `sp500`: a 50-per-request cache held no bars for DOW (2,575 alone) or CCE
   (718 alone), although neither had its successor in the same request, so the trigger is
