@@ -3,7 +3,9 @@
 Status: accepted (2026-11-19). Amended in PR 1 after its review: upstream corrections and
 bad-bar windows (decisions 8 and 9), and an auditable same-day review of renames. Amended
 in PR 2: how a removal exit fills when no bar follows (decision 6), what `members()`
-returns (decision 4), and how the rename check measures coverage (decision 2).
+returns (decision 4), and how the rename check measures coverage (decision 2). Amended
+in PR 4: the summary field PR 3 shipped (decision 7) and the measured speed (Costs).
+Implemented for backtests by #57, #59, #62 and #63 (2026-11-20).
 Resolves the open question "Data source for historical index membership" in
 `ARCHITECTURE.md` for backtests. Paper trading support is a later step with one hard
 requirement fixed here.
@@ -122,10 +124,22 @@ inflates most.
      session's opening buys.
    - The 5-session no-data rule now applies only to held symbols that lose their bars
      while still members.
-7. **Missing bars are reported, not filled.** Each run's summary gets `membership_coverage`:
-   member-sessions with a bar, as a share of all member-sessions, plus the tickers with
-   none. The 6 removals with no bars anywhere (CCE, DOW, SNDK, STI, TE, WYND, all
-   2016-2019) bias results slightly toward survivors; the number says how much.
+7. **Missing bars are reported, not filled.** A point-in-time run's `summary.json` gets a
+   `membership` block: the sha256 of the four source files, and `membership.coverage` over
+   the traded sessions (warm-up left out): member-sessions, those with a bar, the share,
+   those a bad-bars window removed (`bad_bar_sessions`), and `tickers_without_bars`, the
+   members with no usable bar in any of their member sessions. Fixed universes write
+   `membership: null`. Members without bars bias results slightly toward survivors; the
+   number says how much.
+   - `sp500`, 2016-01-04 to 2026-03-31, after #62: share 0.9959 (1,292,590 of 1,297,873
+     member-sessions), 1,293 bad-bar sessions, no usable bar for AABA, PARA, STI, TE and
+     WYND. PARA is masked as a different security throughout; STI and TE have bars only
+     after they left (reused tickers).
+   - A ticker is listed only when none of its member sessions has a bar. Old SanDisk
+     (`SNDK`) and old Dow Chemical (`DOW`, bars marked bad) have none, but their tickers
+     carry the later company's bars as members, so they lower the share without being
+     listed. CCE, once on this list, was missing only because of the batching bug fixed
+     in #62.
 
 8. **Upstream errors are corrected in a reviewed file, not in the copy.**
    `sp500-corrections.csv` replaces or drops upstream rows (each must match one row
@@ -155,8 +169,8 @@ inflates most.
 - Data: about 730 symbols, about 40 MB of Parquet (the 239 removed names took about 14 MB); the
   first download is about 15 batches of 50 symbols, a few minutes at the rate limit. The
   panel is about 2,600 sessions x 730 symbols x 5 fields (75 MB in memory).
-- Speed: strategies that compute over all columns each session get slower; fine for daily
-  bars, measured in PR 3.
+- Speed: measured in PR 3 with `speed_momentum` over the full range: 9.6 s from a warm
+  cache, 95 s including a full cache rebuild. Fine for daily bars.
 
 ## PR plan (each small; harness PRs flagged as sensitive)
 
@@ -180,5 +194,5 @@ inflates most.
 
 ## Open questions
 
-- The source's rows before 2001 are thinner (fewer than 500 names); irrelevant while
-  Alpaca bars start in 2016, but `sp500-membership.md` should say so.
+- None for backtests. (The source's thinner rows before 2001 are now noted in
+  `sp500-membership.md`.)

@@ -11,6 +11,9 @@ Rules every strategy follows:
 - Compute indicators from `view.history` / `view.series` each session, not from state
   accumulated across `on_bar` calls: during a holdout warm-up the engine fills the view
   without calling `on_bar`, so accumulated state would be missing those sessions.
+- To pick stocks, rank among `view.members()`: on a point-in-time universe (`sp500`) it
+  lists the symbols you may enter today. The engine drops entries for anything else and
+  exits a held name when it leaves the index.
 - Import only numpy, pandas, math and similar, plus `harness.models`, `harness.view`,
   and `strategies.base`. The run entry point rejects anything else.
 - Never read or write files or use the network (`open`, `pd.read_csv`, `np.load`,
