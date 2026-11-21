@@ -252,8 +252,9 @@ def test_kill_latches_then_cancels_and_confirms(tmp_path: Path) -> None:
         venue=venue, alerts=alerts, sleep=venue.advance, now=lambda: T0,
     )  # fmt: skip
     assert state == KillState(
-        engaged=True, at=T0, reason="operator stop", source="operator:cli", cancel_confirmed=True
-    )
+        engaged=True, at=T0, reason="operator stop", source="operator:cli", cancel_confirmed=True,
+        kills=1,
+    )  # fmt: skip
     assert KillSwitch(latch.path).state() == state  # recorded in the latch file
     assert venue.open_orders() == []
     # Cancels only: nothing was placed and the position is untouched.
@@ -440,3 +441,100 @@ def test_kill_survives_a_sleep_or_clock_that_raises(tmp_path: Path) -> None:
     )
     assert state.engaged and not state.cancel_confirmed
     assert alerts.alerts[0].severity == "critical"  # still sent, stamped with the real clock
+
+
+# --------------------------------------------------------------------------- every kill is noted
+
+
+def test_every_kill_changes_the_latch_file_confirmed_or_not(tmp_path: Path) -> None:
+    # Issue #40: a flatten running elsewhere watches the file, so each kill must change it.
+    latch = switch(tmp_path / "KILL")
+    first = kill(latch, "stop", "operator:cli")  # no venue: nothing is confirmed
+    assert (first.kills, first.cancel_confirmed) == (1, False)
+    before = latch.on_disk()
+    venue = venue_with_orders()
+    venue.fail_next("cancel_all", times=99)
+    second = kill(KillSwitch(latch.path), "again", "operator:other", venue=venue, attempts=1)
+    assert not second.cancel_confirmed and second.kills == 2
+    after = latch.on_disk()
+    assert after != before and after.kills == 2
+    assert (after.reason, after.source, after.at) == ("stop", "operator:cli", T0)  # the first
+
+
+def test_the_kill_is_noted_before_the_venue_is_asked(tmp_path: Path) -> None:
+    latch = switch(tmp_path / "KILL")
+    latch.engage("flatten", "operator:david")
+    seen: list[int] = []
+
+    class Watching(FakeVenue):
+        def cancel_all(self) -> None:
+            seen.append(latch.on_disk().kills)
+            super().cancel_all()
+
+    venue = Watching(clock=at(DAY, 8, 0))
+    kill(KillSwitch(latch.path), "stop", "operator:other", venue=venue, sleep=venue.advance)
+    assert seen == [1]
+
+
+def test_latch_written_before_kills_were_counted_still_reads(tmp_path: Path) -> None:
+    path = tmp_path / "KILL"
+    path.write_text(
+        '{"engaged":true,"at":"2024-01-03T13:00:00Z","reason":"old","source":"operator:cli",'
+        '"cancel_confirmed":true}\n'
+    )
+    state = KillSwitch(path).state()
+    assert (state.reason, state.kills, state.cancel_confirmed) == ("old", 0, True)
+    assert KillSwitch(path).note_kill() and KillSwitch(path).state().kills == 1
+    assert KillSwitch(path).state().cancel_confirmed  # the note changes nothing else
+
+
+def test_kill_that_cannot_note_itself_says_a_flatten_may_still_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    latch = switch(tmp_path / "KILL")
+    latch.engage("flatten", "operator:david")
+    before = latch.on_disk()
+
+    def fails(*args: object) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr("harness.killswitch.os.replace", fails)
+    venue = venue_with_orders()
+    alerts = Recorder()
+    state = kill(
+        KillSwitch(latch.path), "stop", "operator:other",
+        venue=venue, alerts=alerts, sleep=venue.advance,
+    )  # fmt: skip
+    assert state.cancel_confirmed and venue.open_orders() == []  # it still cancels
+    assert latch.on_disk() == before
+    assert "a flatten running in another terminal may NOT have stopped" in alerts.alerts[0].message
+
+
+def test_an_unreadable_or_missing_latch_needs_no_note(tmp_path: Path) -> None:
+    latch = switch(tmp_path / "KILL")
+    assert latch.note_kill() and not latch.engaged()  # nothing to note, nothing created
+    latch.path.write_text("garbled")
+    assert latch.note_kill() and latch.path.read_text() == "garbled"
+
+
+def test_the_sell_pass_ends_when_the_latch_file_changes(tmp_path: Path) -> None:
+    latch = switch(tmp_path / "KILL")
+    latch.engage("flatten", "operator:david")
+    under = latch.orders_sent()
+    with latch.flattening(under):
+        latch.check(selling=True)
+        kill(KillSwitch(latch.path), "stop", "operator:other")  # no venue, not confirmed
+        with pytest.raises(KillSwitchEngaged):
+            latch.check(selling=True)
+    with latch.flattening(under):  # the old latch is no pass either
+        with pytest.raises(KillSwitchEngaged):
+            latch.check(selling=True)
+
+
+def test_the_sell_pass_ends_when_the_switch_is_reset(tmp_path: Path) -> None:
+    latch = switch(tmp_path / "KILL")
+    latch.engage("flatten", "operator:david")
+    with latch.flattening(latch.orders_sent()):
+        KillSwitch(latch.path).reset("david", "p", "p")
+        with pytest.raises(KillSwitchEngaged):
+            latch.check(selling=True)  # no latch on disk is not the latch it started under
