@@ -34,7 +34,7 @@ reconciliation, and a clock-driven runner around the broker.
 | File | Responsibility | Slice |
 |---|---|---|
 | `harness/models.py` | Shared data shapes: Bar, Stock, OptionContract, Leg, Signal, Fill, Position | 1 |
-| `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models | 1 |
+| `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models. For a point-in-time universe, load the membership, corrections, renames and bad-bars files into a validated `Membership` | 1 |
 | `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff. Two ways past it, each with its own log: `HoldoutAccess` (a holdout backtest) and `PaperAccess` (paper trading a frozen profile). `raw_opens` gives paper trading the unadjusted opens its fills are measured against | 1 |
 | `harness/ratelimit.py` | Request rate limiter shared by the data loader and the venue adapter | 2 |
 | `harness/orders.py` | Order manager core: staging, deterministic order ids, duplicate-free submission (write-ahead journal, lookup before resend), venue states into ledger fills, cancel with confirmation, recovery after a restart. Implements `Broker` for paper trading: `on_session_open` runs the open (auction exits, entries released against the actual account after the open, deadlines), with optional manual approval of entries | 2 |
@@ -42,18 +42,18 @@ reconciliation, and a clock-driven runner around the broker.
 | `harness/killswitch.py` | Kill latch file (fails closed, any process can set it) and `kill`, which sets it, then cancels open orders and confirms. Never sells. `flattening()` is the one pass through a set latch: sells only, for the operator's `flatten` | 2 |
 | `harness/alerts.py` | `Alert`, the `Alerter` protocol, and the log and `alerts.jsonl` sinks. A sink never raises | 2 |
 | `harness/keys.py` | Read API keys from `.env` into a redacted local object; never touches the environment | 2 |
-| `harness/view.py` | Append-only bar buffer and the read-only `MarketView` strategies receive | 1 |
+| `harness/view.py` | Append-only bar buffer and the read-only `MarketView` strategies receive. For a point-in-time universe, the `MemberMask` (members per session) and `MarketView.members()`; a ticker's bars are hidden after its last membership | 1 |
 | `harness/guard.py` | Runtime guard: rejects file opens, network use, and process starts while strategy code runs | 1 |
 | `strategies/base.py` | `Strategy` interface; each strategy declares a pydantic `Params` class and receives it in its constructor | 1 |
 | `strategies/*.py` | Emit entry and exit signals from a read-only view of past bars | 1+ |
 | `harness/costs.py` | Estimate trade cost (flat % now) | 1 |
 | `harness/construction.py` | Rank signals, size positions (equal weight, max N now) | 1 |
-| `harness/engine.py` | Daily loop; hands strategies a past-only view; fills at next open | 1 |
+| `harness/engine.py` | Daily loop; hands strategies a past-only view; fills at next open. With a point-in-time universe, drops entries for non-members and exits a held name when it leaves (`index_removal`) | 1 |
 | `harness/broker/base.py` | Broker interface shared by all adapters | 1 |
 | `harness/broker/sim.py` | Simulated fills for backtests | 1 |
 | `harness/broker/venue.py` | Venue protocol: place, report and cancel single orders, and `verify_account`, the setup gate. Its models refuse order shapes the harness never sends (a buy that is not a limit order, fractional shares) | 2 |
-| `harness/run.py` | `run_backtest(recipe)` function plus a thin CLI over it; loads strategies by name, checks their imports | 1 |
-| `harness/report.py` | Run outputs with a fixed schema, the resolved recipe per run, metrics, SPY benchmark, run index | 1 |
+| `harness/run.py` | `run_backtest(recipe)` function plus a thin CLI over it; loads strategies by name, checks their imports. For a point-in-time universe, builds the member mask, removes bad-bars windows, and checks each rename against the bars | 1 |
+| `harness/report.py` | Run outputs with a fixed schema, the resolved recipe per run, metrics, SPY benchmark, run index. A point-in-time run's summary adds a `membership` block (source file hashes, coverage) | 1 |
 | `harness/indicators.py` | Indicator calculations (SMA, RSI, ...) from past bars only; each addition is reviewed with a look-ahead test | Rules |
 | `strategies/rules.py` | Generic strategy that runs a rule template (indicators plus conditions, as data) | Rules |
 | `harness/risk.py` | Hard limits; can shrink or reject; never blocks risk-reducing orders | 2 |
@@ -169,7 +169,8 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   free daily data, and LLM response times; options come after one stock strategy
   completes the full lifecycle.
 - **Universe:** 10 names for plumbing only (survivorship-biased); index and sector ETFs
-  for first real evaluation; historical index membership needed before stock-picking strategies.
+  for first real evaluation; historical index membership needed before stock-picking strategies
+  (met for backtests by the point-in-time `sp500` universe, 2026-11-20).
 - **Alpaca:** free data is fine for daily stock bars; real-time options data
   (OPRA) needs the paid data plan before options go live.
 
@@ -309,10 +310,34 @@ Benchmark is SPY buy-and-hold, after costs and taxes, not zero.
   there is no "update a profile", only promoting a new one. All profiles are gitignored, the plumbing one included: a profile holds the
   machine's absolute paths and its creation time, so it is made where it trades.
 
+### Point-in-time S&P 500 universe (2026-11-20)
+
+Design and rejected alternatives: `docs/pit-universe-design.md`.
+
+- **Stock-picking backtests use historical membership:** `sp500` is a pinned copy of the
+  MIT-licensed `fja05680/sp500` membership file, plus reviewed corrections, renames and
+  bad-bars windows in `config/universe/`. Updating any of them is a reviewed PR, never a
+  fetch at run time, and the run summary records each file's sha256.
+- **The harness enforces membership, not the strategy:** a strategy may enter only
+  `view.members()`; the engine drops other entries (`entry_skipped_not_member`) and exits a
+  held name at its removal (`index_removal`), so a strategy that forgets to filter cannot
+  trade a survivor-only universe.
+- **Renames are one column:** a reviewed rename map joins old and new tickers under the
+  later one, so a position held across a ticker change is untouched.
+- **A removal with no bar on the first day out closes at the last close:** the successor's
+  open was rejected because dividend adjustment fakes gaps of up to -23%.
+- **Missing bars are reported, not filled:** `membership.coverage` in every point-in-time
+  summary (`sp500`: 0.9959 of member-sessions have a bar).
+- **No paper trading on a point-in-time universe yet:** promotion refuses such a run, and
+  the paper runner refuses such a profile if one exists anyway, since it builds the engine
+  without the member mask or bad-bars windows. Paper support is its own design, which must
+  add a freshness check on the membership file.
+
 ## Open questions
 
 - Is the flat 0.05% cost assumption realistic once paper fills come in?
-- Data source for historical index membership, if stock-picking strategies are pursued.
+- Keeping historical index membership current for paper trading (backtests are resolved:
+  `docs/pit-universe-design.md`): update cadence and how stale the list may be.
 - Actual hard-limit values for each slice 2 risk preset (position size, exposure, daily
   loss cap, drawdown halt), and the values in `config/execution.yaml` (entry limit, order
   deadlines, fat-finger limits). Both hold placeholders until chosen.

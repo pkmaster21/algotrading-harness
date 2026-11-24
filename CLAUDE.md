@@ -13,6 +13,7 @@ Strategies are pluggable modules; the harness owns everything else.
 | Unresolved decisions         | `ARCHITECTURE.md` → Open questions         |
 | UI principles and contract   | `docs/ui-design.md`                        |
 | Operating paper trading      | `docs/paper-runbook.md`                    |
+| Point-in-time sp500 universe | `docs/pit-universe-design.md`              |
 | Results of a past backtest   | `backtests/<run>/summary.json` (see below) |
 
 Read `ARCHITECTURE.md` when planning a new slice or changing the harness,
@@ -58,12 +59,13 @@ strategies/   # strategy modules only; one file per strategy (gitignored except 
 config/       # YAML, read only by harness/config.py
   strategies/ #   strategy presets (params, rule templates); UI-editable; gitignored except example
   risk/       #   risk presets (conservative, balanced, aggressive)
-  universe/   #   symbol lists
+  universe/   #   symbol lists; sp500 is point-in-time (membership, renames, corrections, bad bars)
   *.yaml      #   fixed settings: costs, construction, dates, data, execution (not UI-editable)
 docs/         # detail docs (ui-design.md); entry-point docs stay at the root
 tests/        # pytest; test strategies (buy-and-hold, look-ahead cheater) live here
 data/         # local bar cache (gitignored)
 backtests/    # run outputs (gitignored)
+research/     # strategy research notes: pass cards, search scripts, trial logs (gitignored)
 ```
 
 ## Conventions

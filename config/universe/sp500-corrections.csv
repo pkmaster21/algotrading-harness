@@ -1,0 +1,4 @@
+ticker,start_date,end_date,new_start_date,new_end_date,reason
+KORS,2013-11-13,2018-09-19,,,"Michael Kors renamed Capri; upstream lists both tickers at once, so drop KORS (Alpaca's KORS and CPRI bars are identical)"
+CPRI,2016-01-04,2020-05-12,2013-11-13,2020-05-12,Capri is Michael Kors; membership starts with Kors on 2013-11-13 (upstream gives CPRI a wrong 2016-01-04 start)
+BHGE,1996-01-02,2019-10-18,2017-07-05,2019-10-18,"Upstream lists Baker Hughes under BHGE from 1996, but BHGE began trading on 2017-07-05 (the GE merger); old Baker Hughes is BHI on Alpaca, a separate series, so the BHI years are a gap (sp500-membership.md)"

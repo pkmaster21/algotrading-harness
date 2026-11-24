@@ -170,7 +170,7 @@ def test_warm_up_never_touches_the_broker() -> None:
 
 def test_broker_that_cannot_force_close_is_logged_every_session() -> None:
     class NoForcedClose(SimBroker):
-        def force_close(self, symbol, price, price_date, session):  # type: ignore[no-untyped-def]
+        def force_close(self, symbol, price, price_date, session, *, reason):  # type: ignore[no-untyped-def]
             return None
 
     panel = make_panel(SYMBOLS, 18, missing={"AAPL": range(10, 18)})

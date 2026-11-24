@@ -5,7 +5,9 @@ included), the execution settings, and the hash of the strategy source. Editing 
 or a strategy file later never changes what is trading; changing anything means a new
 profile with a new id. The profile id is `<name>-<first 8 of content_hash>`, and the
 content hash covers every field, so a profile whose file was edited no longer matches
-its own id and is refused.
+its own id and is refused. A field added to the models after profiles were frozen is left
+out of the hash while it holds its default (`HASH_OMITTED_AT`), so a profile frozen before
+it existed keeps loading.
 
 Promotion refuses a run that is not ready: the strategy file changed since the run, the
 tree was dirty, no risk preset, no holdout run for the same recipe (a plumbing profile
@@ -39,7 +41,7 @@ import re
 import shutil
 import stat
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -83,6 +85,20 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]*(-[a-z0-9_]+)*$")
 _PROFILE_ID_RE = re.compile(PROFILE_ID_PATTERN)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HASHED_EXCLUDED = {"profile_id", "content_hash"}
+
+# Fields added to what a profile holds after profiles had been frozen, by dotted path in
+# the profile's JSON, each with the value (as JSON) at which it is left out of the content
+# hash. A profile frozen before the field existed has no such key, so hashing it with the
+# key would break every one of them. tests/profile_fields.json pins every field path
+# and these values: a new field fails that test until it is listed here, and so does a
+# changed default, which would otherwise change what an old profile loads with no
+# mismatch to show for it.
+HASH_OMITTED_AT: dict[str, Any] = {
+    "recipe.universe.membership": None,
+}
+# From #57 (d0b77be) until this list existed, the hash included `membership` as null.
+# Profiles frozen then verify against the hash with that key kept.
+_KEPT_BEFORE_OMITTING = frozenset({"recipe.universe.membership"})
 
 
 class ProfileError(RuntimeError):
@@ -131,24 +147,52 @@ class FrozenProfile(FrozenModel):
             raise ValueError(f"only {PLUMBING_STRATEGY} may be a plumbing profile")
         if not self.plumbing and self.holdout_run_id is None:
             raise ValueError("a profile that is not plumbing needs a holdout run")
-        expected = self.hashed_content()
-        if self.content_hash != expected:
+        if self.content_hash not in self.accepted_hashes():
             raise ValueError("content hash does not match the profile's fields")
         if self.profile_id != profile_id_for(self.name, self.content_hash):
             raise ValueError("profile id does not match the name and content hash")
         return self
 
     def hashed_content(self) -> str:
-        """sha256 of the canonical JSON of every field but the id and the hash itself."""
+        """sha256 of the canonical JSON of every field but the id and the hash itself,
+        less the `HASH_OMITTED_AT` fields that hold their omitted value."""
+        return self._hash(HASH_OMITTED_AT.keys())
+
+    def accepted_hashes(self) -> frozenset[str]:
+        """The content hashes this profile verifies against: the current one, and the
+        one profiles frozen between #57 and the omitted-field list were given."""
+        later = HASH_OMITTED_AT.keys() - _KEPT_BEFORE_OMITTING
+        return frozenset({self.hashed_content(), self._hash(later)})
+
+    def _hash(self, omit: Iterable[str]) -> str:
         payload = self.model_dump(mode="json", exclude=_HASHED_EXCLUDED)
+        for path in omit:
+            _drop_at(payload, path, HASH_OMITTED_AT[path])
         return hashlib.sha256(_canonical(payload)).hexdigest()
 
     def verify(self) -> None:
         """Raise ProfileTampered unless the fields still match the id and hash."""
-        if self.content_hash != self.hashed_content() or self.profile_id != profile_id_for(
+        if self.content_hash not in self.accepted_hashes() or self.profile_id != profile_id_for(
             self.name, self.content_hash
         ):
             raise ProfileTampered(f"profile {self.profile_id} does not match its content")
+
+
+def _drop_at(node: Any, path: str, omitted: Any) -> None:
+    """Remove the key at dotted `path` from nested dicts where its value equals `omitted`.
+    A part ending in `[]` names a list, and the rest of the path applies to each item."""
+    part, _, rest = path.partition(".")
+    name, many = (part[:-2], True) if part.endswith("[]") else (part, False)
+    if not isinstance(node, dict) or name not in node:
+        return
+    if not rest:
+        if not many and node[name] == omitted:
+            del node[name]
+        return
+    children = node[name] if many else [node[name]]
+    if isinstance(children, list):
+        for child in children:
+            _drop_at(child, rest, omitted)
 
 
 def profile_id_for(name: str, content_hash: str) -> str:
@@ -250,6 +294,15 @@ def promote_run(
     run_dir = Path(run_dir)
     snapshot = _read_snapshot(run_dir)
     recipe = _run_recipe(snapshot, run_dir)
+    if recipe.universe.membership is not None:
+        # The restart check below and the paper runner build the engine without the
+        # member mask or the bad-bars windows, so they would trade every ticker that was
+        # ever a member. Paper trading a point-in-time universe has its own design first.
+        raise ProfileError(
+            f"universe {recipe.universe.name!r} is point-in-time; it cannot be promoted "
+            "until paper trading supports membership (docs/pit-universe-design.md, "
+            "Paper trading)"
+        )
     if snapshot.get("holdout") is not False:
         raise ProfileError(
             "promote the in-sample run, not the holdout run; the holdout run of the same "

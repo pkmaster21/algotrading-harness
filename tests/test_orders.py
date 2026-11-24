@@ -1160,7 +1160,7 @@ def test_session_order_cap_kills(tmp_path: Path) -> None:
 def test_force_close_never_invents_a_fill(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     before = rig.om.account()
-    assert rig.om.force_close("AAPL", 100.0, DM1, D1) is None
+    assert rig.om.force_close("AAPL", 100.0, DM1, D1, reason="no_data") is None
     assert rig.om.account() == before == rig.ledger.account()
     assert rig.om.poll_updates() == [] and rig.venue.place_attempts == []
     assert rig.alerts.kinds() == ["position_stale_no_data"]

@@ -347,7 +347,7 @@ class BrokerContract:
         settle(rig, D1, {"AAPL": 100.0}, {buy_id: buy})
         held = rig.broker.account()
 
-        order_id = rig.broker.force_close("AAPL", 90.0, D1, D3)
+        order_id = rig.broker.force_close("AAPL", 90.0, D1, D3, reason="no_data")
         updates = rig.broker.poll_updates()
         if order_id is None:  # a broker that cannot sell at a stale price invents nothing
             assert updates == []

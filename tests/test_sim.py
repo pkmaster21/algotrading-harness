@@ -203,11 +203,11 @@ def test_buy_for_held_symbol_raises() -> None:
 def test_force_close_requires_a_held_symbol_and_a_stale_price() -> None:
     broker = SimBroker(10_000, COSTS)
     with pytest.raises(ValueError):
-        broker.force_close("AAPL", 100.0, D0, D2)
+        broker.force_close("AAPL", 100.0, D0, D2, reason="no_data")
     broker.submit([_order("AAPL", "buy", 1)])
     broker.on_session_open(D1, {"AAPL": 100.0})
     with pytest.raises(ValueError):  # price from the trigger session itself: rejected by Fill
-        broker.force_close("AAPL", 100.0, D2, D2)
+        broker.force_close("AAPL", 100.0, D2, D2, reason="no_data")
 
 
 def test_option_orders_not_supported() -> None:

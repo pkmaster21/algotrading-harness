@@ -434,6 +434,21 @@ def test_a_tampered_profile_kills(tmp_path: Path) -> None:
     assert "open orders were NOT canceled" in report.alerts[0].message
 
 
+def test_a_point_in_time_profile_is_not_traded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Promotion refuses these; a profile that has one anyway stops before the venue.
+    rig = Rig(tmp_path)
+    universe = rig.profile.recipe.universe.model_copy(update={"membership": object()})
+    recipe = rig.profile.recipe.model_copy(update={"universe": universe})
+    pit = rig.profile.model_copy(update={"recipe": recipe})
+    monkeypatch.setattr(paper, "load_profile", lambda *a, **kw: pit)  # type: ignore[misc]
+    calls = len(rig.venue.calls)
+    with pytest.raises(PaperError, match="point-in-time"):
+        rig.run()
+    assert len(rig.venue.calls) == calls
+
+
 def test_an_error_before_the_account_is_verified_latches_without_canceling(
     tmp_path: Path,
 ) -> None:

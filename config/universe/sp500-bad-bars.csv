@@ -1,0 +1,7 @@
+ticker,from_date,to_date,reason
+ARNC,2020-04-01,,"From 2020-04-01 Alpaca's ARNC is the Arconic Corp. spin-off, not Howmet (the member, under HWM from 2020-04-06)"
+CTRA,,2021-10-04,"Before 2021-10-04 Alpaca's CTRA is Contura Energy, not Coterra"
+DOW,,2019-04-02,"Before 2019-04-02 Alpaca's DOW is not Dow Chemical: it tracks DuPont (return correlation 0.998 with DD) to 2017-09-01, then repeats $44.18 for 396 sessions"
+EXE,2020-06-29,2021-02-10,"Stale: one price ($9.27) repeated for 156 sessions during Chesapeake's bankruptcy"
+PARA,,,"Alpaca's PARA is not Paramount (adjusted closes from $578 to $1.1M); Paramount's 2022-2025 bars are not on Alpaca"
+SMCI,2018-08-23,2020-01-14,"Stale: one price ($1.565) repeated for 349 sessions while SMCI was delisted from Nasdaq"

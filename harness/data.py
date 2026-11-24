@@ -381,7 +381,9 @@ class AlpacaBarFetcher:
 
 # --------------------------------------------------------------------------- cache
 
-CACHE_SCHEMA_VERSION = 1
+# 2: a symbol that a multi-symbol request returned empty is refetched alone (issue #56),
+# so caches written before that may hold an empty series for a ticker that has bars.
+CACHE_SCHEMA_VERSION = 2
 _META_KEY = b"harness_cache_meta"
 
 
@@ -657,13 +659,18 @@ class DataLoader:
             raise HoldoutViolation(f"refusing to request bars through {end} (cutoff {cutoff})")
         if self._fetcher is None:
             self._fetcher = self._factory()
+        fetch = self._fetcher.fetch_raw if raw else self._fetcher.fetch
         result: dict[str, pd.DataFrame] = {}
         for i in range(0, len(symbols), self.cfg.batch_size):
             batch = list(symbols[i : i + self.cfg.batch_size])
-            fetch = self._fetcher.fetch_raw if raw else self._fetcher.fetch
             fetched = fetch(batch, start, end)
             for s in batch:
                 frame = _clean(fetched.get(s))
+                if frame.empty and len(batch) > 1:
+                    # Alpaca can return nothing for a ticker in a multi-symbol request
+                    # that it returns in full when asked alone (issue #56), so what a
+                    # symbol gets would depend on its batch. Ask again with it alone.
+                    frame = _clean(fetch([s], start, end).get(s))
                 dates = list(frame["date"])
                 if dates and (min(dates) < start or max(dates) > end):
                     raise DataError(f"{s}: fetcher returned bars outside {start}..{end}")
