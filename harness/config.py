@@ -640,6 +640,7 @@ _SPINOFFS_HEADER = [
     "parent", "ex_date", "children", "parent_close", "child_closes",
     "factor", "dividend_factor", "applied_factor", "multiplier", "cached_step", "note",
 ]  # fmt: skip
+SPINOFFS_HEADER = tuple(_SPINOFFS_HEADER)  # for the build, which writes the file
 # Relative slack when a row's stored values are checked against each other: they are
 # computed from one another by the build, so only decimal rounding separates them.
 _SPINOFF_REL_TOL = 1e-6
@@ -715,7 +716,31 @@ def load_spinoffs(config_dir: Path = DEFAULT_CONFIG_DIR) -> tuple[SpinOffEvent, 
     """Every row of `config_dir`/corporate-actions/spinoffs.csv, sorted by (parent,
     ex_date). The file is required: a missing one would silently drop every adjustment.
     Raises ConfigError naming the file and line on any invalid row."""
-    path = config_dir / SPINOFFS_FILE
+    return read_spinoffs(config_dir / SPINOFFS_FILE)
+
+
+def spinoff_fields(event: SpinOffEvent) -> list[str]:
+    """`event` as a spinoffs.csv row, in the header's order, as `read_spinoffs` reads it
+    back: floats in their shortest exact form."""
+    return [
+        event.parent,
+        event.ex_date.isoformat(),
+        ";".join(f"{t}:{r!r}" for t, r in event.children),
+        repr(event.parent_close),
+        ";".join(
+            f"{t}:{c!r}" for (t, _), c in zip(event.children, event.child_closes, strict=True)
+        ),
+        repr(event.factor),
+        repr(event.dividend_factor),
+        repr(event.applied_factor),
+        repr(event.multiplier),
+        repr(event.cached_step),
+        event.note,
+    ]
+
+
+def read_spinoffs(path: Path) -> tuple[SpinOffEvent, ...]:
+    """The rows of a spinoffs.csv at `path`; see `load_spinoffs`."""
     events: list[SpinOffEvent] = []
     for n, row in enumerate(_read_csv(path, _SPINOFFS_HEADER), start=2):
         fields = dict(zip(_SPINOFFS_HEADER, row, strict=True))
@@ -762,6 +787,35 @@ def _recipe_spinoffs(events: tuple[SpinOffEvent, ...], raw: dict[str, Any]) -> l
     if isinstance(backtest, dict) and isinstance(backtest.get("benchmark"), str):
         own.add(backtest["benchmark"])
     return [e.applied() for e in events if e.parent in own]
+
+
+class DataSettings(FrozenModel):
+    """The fixed settings a tool that fetches data outside a run needs: the dates (for
+    the holdout cutoff), the data settings, and the benchmark (a symbol that trades every
+    session, used as the calendar)."""
+
+    dates: DateConfig
+    data: DataConfig
+    benchmark: str
+
+
+def load_data_settings(config_dir: Path = DEFAULT_CONFIG_DIR) -> DataSettings:
+    """dates.yaml, data.yaml and the benchmark from backtest.yaml in `config_dir`, with
+    relative paths resolved as `load_recipe` resolves them."""
+    config_dir = config_dir.resolve()
+    dates = _read_yaml(config_dir / "dates.yaml")
+    data = _resolve_paths(
+        _read_yaml(config_dir / "data.yaml"), _PATH_FIELDS["data"], config_dir.parent
+    )
+    benchmark = _read_yaml(config_dir / "backtest.yaml").get("benchmark")
+    try:
+        settings = DataSettings.model_validate(
+            {"dates": dates, "data": data, "benchmark": benchmark}
+        )
+        Stock(symbol=settings.benchmark)
+    except ValidationError as exc:
+        raise ConfigError(f"invalid config in {config_dir}:\n{exc}") from exc
+    return settings
 
 
 def load_execution(config_dir: Path = DEFAULT_CONFIG_DIR) -> ExecutionConfig:

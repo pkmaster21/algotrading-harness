@@ -31,6 +31,7 @@ import os
 import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -277,6 +278,17 @@ class BarFetcher(Protocol):
         ...
 
 
+class DividendFetcher(Protocol):
+    """Source of cash dividends. AlpacaDividendFetcher in production, fakes in tests."""
+
+    def cash_dividends(
+        self, symbol: str, start: dt.date, end: dt.date
+    ) -> list[tuple[dt.date, float]]:
+        """(ex-date, cash per share as paid, not adjusted) of each cash dividend of
+        `symbol` going ex in [start, end]."""
+        ...
+
+
 _COLUMNS = ["date", *PRICE_FIELDS]
 
 
@@ -377,6 +389,86 @@ class AlpacaBarFetcher:
         if not isinstance(barset, BarSet):
             raise DataError(f"unexpected response type from Alpaca: {type(barset).__name__}")
         return frames_from_alpaca_df(barset.df, symbols)
+
+
+class AlpacaDividendFetcher:
+    """Cash dividends from Alpaca's corporate actions API (read-only), for the spin-off
+    build (`harness.corporate_actions`). Keys are read as `AlpacaBarFetcher` reads them.
+
+    Alpaca selects corporate actions by their process date, which for a cash dividend
+    can be weeks after the ex-date, so the request reaches `_PROCESS_LAG` past `end` and
+    the rows are then kept by ex-date. Nothing outside [start, end] is returned.
+
+    For an event shortly before the holdout start, that reach asks for dividend rows
+    processed in the holdout. They are dropped here, before anything reads them: capping
+    the request at the cutoff could miss a same-day dividend processed after it, and a
+    missed one would silently resolve as none (decided by David, 2026-11-25).
+    """
+
+    _PROCESS_LAG = dt.timedelta(days=120)
+
+    def __init__(
+        self,
+        cfg: DataConfig,
+        limiter: RateLimiter,
+        dotenv_path: Path = PROJECT_ROOT / ".env",
+        today: Callable[[], dt.date] = lambda: dt.datetime.now(MARKET_TZ).date(),
+    ) -> None:
+        from alpaca.data.historical.corporate_actions import CorporateActionsClient
+
+        try:
+            keys = read_alpaca_paper_keys(dotenv_path)
+        except KeysError as exc:
+            raise DataError(f"{exc} to download corporate actions") from None
+        self._limiter = limiter
+        self._today = today
+        self._client = CorporateActionsClient(api_key=keys.key_id, secret_key=keys.secret_key)
+
+    def cash_dividends(
+        self, symbol: str, start: dt.date, end: dt.date
+    ) -> list[tuple[dt.date, float]]:
+        from alpaca.data.enums import CorporateActionsType
+        from alpaca.data.requests import CorporateActionsRequest
+
+        self._limiter.acquire(1)
+        request = CorporateActionsRequest(
+            symbols=[symbol],
+            types=[CorporateActionsType.CASH_DIVIDEND],
+            start=start,
+            end=min(end + self._PROCESS_LAG, self._today()),
+        )
+        try:
+            response = self._client.get_corporate_actions(request)
+        except Exception as exc:  # network, auth, plan limits: surface with context
+            raise DataError(f"Alpaca corporate actions request failed for {symbol}: {exc}") from exc
+        data: Any = getattr(response, "data", None)
+        if not isinstance(data, dict):
+            raise DataError(f"unexpected response type from Alpaca: {type(response).__name__}")
+        out: list[tuple[dt.date, float]] = []
+        for items in data.values():
+            for item in items:
+                ex_date, rate = getattr(item, "ex_date", None), getattr(item, "rate", None)
+                if getattr(item, "symbol", None) != symbol or not isinstance(ex_date, dt.date):
+                    continue
+                if not start <= ex_date <= end:
+                    continue
+                if not isinstance(rate, int | float) or not rate >= 0:  # False for NaN
+                    raise DataError(
+                        f"{symbol}: Alpaca lists a cash dividend going ex {ex_date} with no "
+                        f"valid amount ({rate!r})"
+                    )
+                out.append((ex_date, float(rate)))
+        return sorted(out)
+
+
+@dataclass(frozen=True, slots=True)
+class Window:
+    """Bars and cash dividends of a few symbols over a few sessions, fetched for the
+    spin-off build: adjusted as the cache stores them, and raw as they traded."""
+
+    adjusted: dict[str, pd.DataFrame]
+    raw: dict[str, pd.DataFrame]
+    dividends: dict[str, list[tuple[dt.date, float]]]
 
 
 # --------------------------------------------------------------------------- cache
@@ -490,14 +582,18 @@ class DataLoader:
         cfg: DataConfig,
         fetcher_factory: Callable[[], BarFetcher] | None = None,
         now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+        dividend_factory: Callable[[], DividendFetcher] | None = None,
     ) -> None:
         self.dates = dates
         self.cfg = cfg
         self._cache = _BarCache(cfg.cache_dir)
-        self._factory = fetcher_factory or (
-            lambda: AlpacaBarFetcher(cfg, RateLimiter(cfg.max_requests_per_minute))
-        )
+        self._limiter = RateLimiter(cfg.max_requests_per_minute)
+        self._factory = fetcher_factory or (lambda: AlpacaBarFetcher(cfg, self._limiter))
         self._fetcher: BarFetcher | None = None
+        self._dividend_factory = dividend_factory or (
+            lambda: AlpacaDividendFetcher(cfg, self._limiter)
+        )
+        self._dividends: DividendFetcher | None = None
         self._now = now
 
     # ------------------------------------------------------------------ cutoff
@@ -588,6 +684,44 @@ class DataLoader:
                 if value is not None and value > 0:  # False for NaN
                     opens[(session, symbol)] = float(value)
         return opens
+
+    def window(
+        self,
+        symbols: Sequence[str],
+        start: dt.date,
+        end: dt.date,
+        *,
+        dividends: Sequence[str] = (),
+        holdout: HoldoutAccess | None = None,
+    ) -> Window:
+        """Adjusted and raw bars of `symbols` dated in [start, end], and the cash
+        dividends of `dividends` going ex in it, fetched now and not cached. For the
+        spin-off build (`harness.corporate_actions`), which measures Alpaca's adjustment
+        of one event from both.
+
+        The cutoff is the same as `load`'s: a window reaching the holdout start is
+        refused (HoldoutViolation) unless `holdout` is given, and then the holdout log
+        line is appended first, one per window.
+        """
+        cutoff = self.cutoff(holdout)
+        if end >= cutoff:
+            raise HoldoutViolation(f"refusing to request a window through {end} (cutoff {cutoff})")
+        if end > _last_completed_session(self._now()):
+            raise DataError(f"the window ends {end}, after the last completed session")
+        if holdout is not None:
+            self._log_holdout(holdout, start, end)
+        symbols = list(dict.fromkeys(symbols))
+        adjusted = self._fetch(symbols, start, end, cutoff)
+        raw = self._fetch(symbols, start, end, cutoff, raw=True)
+        paid: dict[str, list[tuple[dt.date, float]]] = {}
+        for symbol in dict.fromkeys(dividends):
+            if self._dividends is None:
+                self._dividends = self._dividend_factory()
+            rows = self._dividends.cash_dividends(symbol, start, end)
+            if any(not start <= d <= end for d, _ in rows):
+                raise DataError(f"{symbol}: fetcher returned dividends outside {start}..{end}")
+            paid[symbol] = rows
+        return Window(adjusted=adjusted, raw=raw, dividends=paid)
 
     def _log_holdout(self, access: HoldoutAccess, start: dt.date, end: dt.date) -> None:
         path = self.cfg.holdout_log

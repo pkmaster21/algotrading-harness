@@ -1,1 +1,10 @@
 parent,ex_date,children,parent_close,child_closes,factor,dividend_factor,applied_factor,multiplier,cached_step,note
+APTV,2017-12-05,DLPH:0.3333333333333333,88.77,DLPH:56.5,0.824974443171,1.0,3.00022637944,0.274970731817,0.283679456497,DLPH on the day (Delphi Automotive); 1 Delphi Technologies (DLPH) per 3 shares; Alpaca applied it as a reverse split (#55)
+CTXS,2017-02-01,LOGM:0.17161,71.24,LOGM:106.6,0.795678709583,1.0,0.999923542257,0.795739550033,0.781285746969,GetGo spun off and merged into LogMeIn at once; 0.17161 LOGM per CTXS share; Alpaca did not apply it (#55)
+GE,2024-04-02,GEV:0.25,136.47,GEV:140.0,0.79588266169,1.0,0.797532607704,0.997931186765,0.975794141164,1 GE Vernova per 4 shares; Alpaca applied it (#55)
+JCI,2016-10-31,ADNT:0.1,40.32,ADNT:45.51,0.898575917631,1.0,1.00005146577,0.898529674109,0.921341979137,1 Adient per 10 shares; Alpaca did not apply it (#55)
+MMM,2024-04-01,SOLV:0.25,94.02,SOLV:69.1,0.844781885979,1.0,0.802067210431,1.05325573093,1.10513902681,1 Solventum per 4 shares; Alpaca's factor differs from the ex-date closes (#55)
+PNR,2018-05-01,NVT:1.0,44.82,NVT:22.72,0.663606751555,1.0,1.00009966507,0.663540619733,0.66610483735,1 nVent per share; Alpaca did not apply it (#55)
+RTX,2020-04-03,CARR:1.0;OTIS:0.5,49.93,CARR:16.92;OTIS:47.32,0.551651751188,1.0,1.99983379397,0.275848799461,0.290281070098,UTX on the day; 1 Carrier and 1/2 Otis per share; Alpaca applied it as a reverse split (#55)
+TGNA,2017-06-01,CARS:0.3333333333333333,15.35,CARS:27.28,0.62798309014,1.0,3.00012701081,0.209318834795,0.215520221224,GCI on the day; 1 Cars.com per 3 shares; Alpaca applied it as a reverse split (#55)
+YUM,2016-11-01,YUMC:1.0,60.69,YUMC:26.19,0.698549723757,1.0,1.00000177959,0.698548480627,0.703406258654,1 Yum China per share; Alpaca did not apply it (#55)
