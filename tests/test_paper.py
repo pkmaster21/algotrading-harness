@@ -50,8 +50,10 @@ class Rig:
     """A plumbing profile of the example strategy, activated on a fake venue whose clock
     drives everything: the runner, the order manager, and the data loader."""
 
-    def __init__(self, tmp_path: Path, *, approval: str = "off") -> None:
-        self.base = ProfileRig(tmp_path, holdout=False)
+    def __init__(
+        self, tmp_path: Path, *, approval: str = "off", spinoffs: Sequence[str] = ()
+    ) -> None:
+        self.base = ProfileRig(tmp_path, holdout=False, spinoffs=spinoffs)
         self.profile = self.base.promote("plumbing", plumbing=True)
         self.profile_id = self.profile.profile_id
         self.execution = self.base.execution

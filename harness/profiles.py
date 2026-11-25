@@ -49,6 +49,7 @@ import numpy as np
 import yaml
 from pydantic import AwareDatetime, Field, ValidationError, model_validator
 
+from harness.adjust import apply_spinoffs
 from harness.broker.sim import SimBroker
 from harness.broker.venue import Venue, VenueDataError
 from harness.config import ExecutionConfig, Recipe, load_execution
@@ -95,6 +96,7 @@ _HASHED_EXCLUDED = {"profile_id", "content_hash"}
 # mismatch to show for it.
 HASH_OMITTED_AT: dict[str, Any] = {
     "recipe.universe.membership": None,
+    "recipe.spinoffs": [],  # the JSON form of the default (); docs/spinoff-design.md
 }
 # From #57 (d0b77be) until this list existed, the hash included `membership` as null.
 # Profiles frozen then verify against the hash with that key kept.
@@ -505,7 +507,9 @@ def check_restart_equivalence(
     build = build or (lambda: build_strategy(recipe))
     loader = loader or DataLoader(recipe.dates, recipe.data)
     symbols = list(dict.fromkeys([*recipe.universe.symbols, recipe.backtest.benchmark]))
-    panel = loader.load(symbols)  # in-sample only: no holdout, no paper access
+    # In-sample only: no holdout, no paper access. Adjusted as paper adjusts, so the check
+    # runs on what paper will, and a profile whose spin-off guard fires is refused here.
+    panel = apply_spinoffs(loader.load(symbols), recipe.spinoffs)
     continuous = _run(recipe, panel, build, rebuild_from=panel.n_dates)
     rebuilt = _run(recipe, panel, build, rebuild_from=max(0, panel.n_dates - sessions))
     for session in panel.dates:

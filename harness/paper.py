@@ -85,6 +85,7 @@ import numpy as np
 import yaml
 from pydantic import AwareDatetime, JsonValue
 
+from harness.adjust import apply_spinoffs
 from harness.alerts import Alert, Alerter, Alerters, JsonlAlerter, LogAlerter, Severity, send_alert
 from harness.broker.alpaca import AlpacaBroker
 from harness.broker.venue import KillSwitchEngaged, Venue, VenueDataError, VenueUnavailable
@@ -872,6 +873,7 @@ class _Day:
         symbols = list(dict.fromkeys([*recipe.universe.symbols, benchmark]))
         try:
             panel = loader.load(symbols, paper=paper_access_for(profile))
+            panel = apply_spinoffs(panel, recipe.spinoffs)  # its guard raises DataError
         except PaperLogError as exc:
             self._fail("paper_access_log", f"no bars and no orders today: {exc}")
         except (DataError, PanelError) as exc:

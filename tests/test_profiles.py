@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -54,8 +55,10 @@ class Rig:
     """A config copy with a fake data source, a backtest run of the example strategy with
     the balanced risk preset, and (unless told otherwise) a holdout run of the same."""
 
-    def __init__(self, tmp_path: Path, *, holdout: bool = True) -> None:
-        self.config = tmp_config(tmp_path)
+    def __init__(
+        self, tmp_path: Path, *, holdout: bool = True, spinoffs: Sequence[str] = ()
+    ) -> None:
+        self.config = tmp_config(tmp_path, spinoffs=spinoffs)
         self.fetcher = FakeFetcher()
         self.execution: ExecutionConfig = load_execution(self.config)
         self.recipe = load_recipe("example_buy_and_hold", "test-3", self.config, risk="balanced")
