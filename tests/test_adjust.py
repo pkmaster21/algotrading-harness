@@ -162,8 +162,9 @@ FETCHER = FakeFetcher()
 AAPL_STEP = FETCHER.price("AAPL", AAPL_EX) / FETCHER.price("AAPL", dt.date(2026, 2, 27))
 
 
-def test_the_shipped_file_has_the_header_only() -> None:
-    assert load_spinoffs(REPO_CONFIG) == ()
+def test_the_shipped_file_loads_with_the_events_it_was_built_for() -> None:
+    # The rows themselves are checked against their listing in test_corporate_actions.py.
+    assert {e.parent for e in load_spinoffs(REPO_CONFIG)} >= {"RTX", "TGNA", "APTV"}
 
 
 def test_the_recipe_carries_the_events_of_its_own_symbols_only(tmp_path: Path) -> None:
@@ -214,7 +215,8 @@ def test_an_edit_to_another_symbols_row_leaves_the_recipe_unchanged(tmp_path: Pa
 )
 def test_an_inconsistent_row_is_refused(tmp_path: Path, row: str, error: str) -> None:
     config = tmp_config(tmp_path, spinoffs=[row])
-    with pytest.raises(ConfigError, match=rf"spinoffs.csv line 2: (?s:.*){error}"):
+    line = len(load_spinoffs(REPO_CONFIG)) + 2  # after the header and the shipped rows
+    with pytest.raises(ConfigError, match=rf"spinoffs.csv line {line}: (?s:.*){error}"):
         recipe(config)
 
 
