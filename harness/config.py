@@ -829,6 +829,28 @@ def load_execution(config_dir: Path = DEFAULT_CONFIG_DIR) -> ExecutionConfig:
         raise ConfigError(f"invalid config in {path}:\n{exc}") from exc
 
 
+def universe_names(config_dir: Path = DEFAULT_CONFIG_DIR) -> tuple[str, ...]:
+    """The name of every universe preset in `config_dir`/universe, sorted."""
+    return tuple(sorted(p.stem for p in (config_dir / "universe").glob("*.yaml")))
+
+
+def load_universe(name: str, config_dir: Path = DEFAULT_CONFIG_DIR) -> UniverseConfig:
+    """One universe preset, resolved as `load_recipe` resolves it, for tools that read
+    every universe (the spin-off audit) rather than run one."""
+    config_dir = config_dir.resolve()
+    raw = _read_preset(config_dir, "universe", name)
+    if "membership" in raw:
+        try:
+            data_start = DateConfig.model_validate(_read_yaml(config_dir / "dates.yaml")).data_start
+        except ValidationError as exc:
+            raise ConfigError(f"invalid config in {config_dir / 'dates.yaml'}:\n{exc}") from exc
+        raw = _resolve_membership(config_dir / "universe", raw, data_start)
+    try:
+        return UniverseConfig.model_validate(raw)
+    except ValidationError as exc:
+        raise ConfigError(f"invalid config in universe/{name}.yaml:\n{exc}") from exc
+
+
 def load_recipe(
     strategy: str,
     universe: str,
