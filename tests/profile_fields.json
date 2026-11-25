@@ -62,6 +62,11 @@
     "recipe.risk.max_exposure_pct": "<required>",
     "recipe.risk.max_position_pct": "<required>",
     "recipe.risk.name": "<required>",
+    "recipe.spinoffs": [],
+    "recipe.spinoffs[].cached_step": "<required>",
+    "recipe.spinoffs[].ex_date": "<required>",
+    "recipe.spinoffs[].multiplier": "<required>",
+    "recipe.spinoffs[].symbol": "<required>",
     "recipe.strategy": "<required>",
     "recipe.strategy.name": "<required>",
     "recipe.strategy.params": "<required>",
@@ -107,6 +112,7 @@
     "strategy_source_sha256": "<required>"
   },
   "hash_omitted_at": {
+    "recipe.spinoffs": [],
     "recipe.universe.membership": null
   }
 }

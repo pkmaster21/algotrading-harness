@@ -33,6 +33,7 @@ from typing import Any
 import numpy as np
 from pydantic import ValidationError
 
+from harness.adjust import apply_spinoffs
 from harness.broker.sim import SimBroker
 from harness.config import ConfigError, Membership, Recipe, load_recipe
 from harness.data import (
@@ -425,7 +426,7 @@ def _run_reserved(
     )
     loader = loader or DataLoader(recipe.dates, recipe.data)
     symbols = list(dict.fromkeys([*recipe.universe.symbols, recipe.backtest.benchmark]))
-    panel = loader.load(symbols, holdout=access)
+    panel = apply_spinoffs(loader.load(symbols, holdout=access), recipe.spinoffs)
     membership = recipe.universe.membership
     members = None
     raw = panel

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from harness.config import Recipe, load_recipe
+from harness.config import SPINOFFS_FILE, Recipe, load_recipe
 
 REPO_CONFIG = Path(__file__).resolve().parent.parent / "config"
 NOW = dt.datetime(2026, 7, 1, 15, 0, tzinfo=dt.UTC)  # last completed session: 2026-06-30
@@ -80,8 +80,10 @@ def tmp_config(
     data_start: str = "2025-10-01",
     holdout_end: str | None = None,
     symbols: Sequence[str] = ("SPY", "AAPL", "MSFT"),
+    spinoffs: Sequence[str] = (),
 ) -> Path:
-    """A copy of the repo config inside tmp_path, so data and run outputs land there."""
+    """A copy of the repo config inside tmp_path, so data and run outputs land there.
+    `spinoffs` are rows added to corporate-actions/spinoffs.csv (see `spinoff_row`)."""
     config = tmp_path / "config"
     shutil.copytree(REPO_CONFIG, config)
     dates = (config / "dates.yaml").read_text().replace("2015-01-01", data_start)
@@ -89,7 +91,29 @@ def tmp_config(
         dates = dates.replace("holdout_end: null", f"holdout_end: {holdout_end}")
     (config / "dates.yaml").write_text(dates)
     (config / "universe" / "test-3.yaml").write_text(f"symbols: [{', '.join(symbols)}]\n")
+    if spinoffs:
+        with (config / SPINOFFS_FILE).open("a") as fh:
+            fh.writelines(f"{row}\n" for row in spinoffs)
     return config
+
+
+def spinoff_row(
+    parent: str,
+    ex_date: dt.date,
+    *,
+    cached_step: float,
+    applied: float = 1.0,
+    dividend: float = 1.0,
+    child: str = "SPUN",
+) -> str:
+    """A consistent spinoffs.csv row: parent closes at 60 on the ex-date and one child
+    share per parent share closes at 40, so the true factor is 0.6."""
+    factor = 60 / (60 + 40)
+    multiplier = factor * dividend / applied
+    return (
+        f"{parent},{ex_date},{child}:1,60,{child}:40,{factor!r},{dividend!r},{applied!r},"
+        f"{multiplier!r},{cached_step!r},synthetic"
+    )
 
 
 def recipe(config: Path, strategy: str = "example_buy_and_hold") -> Recipe:

@@ -10,6 +10,8 @@ Layout:
       strategies/<name>.yaml   strategy presets, picked per run (UI-editable later)
       risk/<name>.yaml         risk presets (hard limits), picked per run
       universe/<name>.yaml     symbol lists or point-in-time membership, picked per run
+      corporate-actions/spinoffs.csv
+                               reviewed spin-offs, applied to every universe
       dates.yaml  costs.yaml  construction.yaml  backtest.yaml  data.yaml
                                fixed settings, shared by every run (changed through review)
       execution.yaml           fixed settings for sending orders to a venue (paper trading)
@@ -24,6 +26,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import hashlib
+import math
 import re
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -355,11 +358,33 @@ class ExecutionConfig(FrozenModel):
         return self
 
 
+class SpinOff(FrozenModel):
+    """One spin-off as a run applies it (docs/spinoff-design.md, decisions 4 to 6): the
+    cached open, high, low and close of every bar of `symbol` before `ex_date` are scaled
+    by `multiplier`. `cached_step` is the cached close on the ex-date over the cached
+    close the session before, as measured when the row was built; a load whose bars
+    show another step fails, because Alpaca's own adjustment has changed."""
+
+    symbol: str
+    ex_date: dt.date
+    multiplier: float = Field(gt=0)
+    cached_step: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        Stock(symbol=self.symbol)
+        return self
+
+
 class Recipe(FrozenModel):
     """Every config value one run uses: the chosen presets plus the fixed settings.
 
     `risk` is None for a run without a risk preset. A run with one also carries the
     order limits, because the risk manager enforces both.
+
+    `spinoffs` holds the reviewed spin-offs of the recipe's own symbols (universe and
+    benchmark), sorted by (symbol, ex_date). A recipe saved before the field existed
+    loads with none.
     """
 
     strategy: StrategyPreset
@@ -371,11 +396,18 @@ class Recipe(FrozenModel):
     data: DataConfig
     risk: RiskConfig | None = None
     limits: OrderLimits | None = None
+    spinoffs: tuple[SpinOff, ...] = ()
 
     @model_validator(mode="after")
     def _check(self) -> Self:
         if (self.risk is None) != (self.limits is None):
             raise ValueError("risk and limits are set together or not at all")
+        keys = [(e.symbol, e.ex_date) for e in self.spinoffs]
+        if keys != sorted(set(keys)):
+            raise ValueError("spinoffs must be sorted by (symbol, ex_date), one per pair")
+        own = {*self.universe.symbols, self.backtest.benchmark}
+        if stray := sorted({e.symbol for e in self.spinoffs} - own):
+            raise ValueError(f"spinoffs listed for symbols the recipe does not use: {stray}")
         return self
 
 
@@ -601,6 +633,137 @@ def _resolve_membership(
     return {"name": name, "symbols": symbols, "membership": membership}
 
 
+# --------------------------------------------------------------------------- spin-offs
+
+SPINOFFS_FILE = Path("corporate-actions") / "spinoffs.csv"  # under the config directory
+_SPINOFFS_HEADER = [
+    "parent", "ex_date", "children", "parent_close", "child_closes",
+    "factor", "dividend_factor", "applied_factor", "multiplier", "cached_step", "note",
+]  # fmt: skip
+# Relative slack when a row's stored values are checked against each other: they are
+# computed from one another by the build, so only decimal rounding separates them.
+_SPINOFF_REL_TOL = 1e-6
+
+
+class SpinOffEvent(FrozenModel):
+    """One row of `spinoffs.csv` (docs/spinoff-design.md, decision 2): the parent, the
+    first session it trades without the children's shares, the children with their
+    shares per parent share and raw ex-date closes, and the values resolved from them.
+    `factor` = P / (P + sum r_i * C_i), `dividend_factor` is that of a cash dividend
+    going ex the same day (1 if none), `applied_factor` is what Alpaca applied, and
+    `multiplier` = factor * dividend_factor / applied_factor."""
+
+    parent: str
+    ex_date: dt.date
+    children: tuple[tuple[str, float], ...] = Field(min_length=1)  # (ticker, ratio)
+    parent_close: float = Field(gt=0)
+    child_closes: tuple[float, ...]  # in the order of `children`
+    factor: float = Field(gt=0, lt=1)
+    dividend_factor: float = Field(gt=0, le=1)
+    applied_factor: float = Field(gt=0)
+    multiplier: float = Field(gt=0)
+    cached_step: float = Field(gt=0)
+    note: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        Stock(symbol=self.parent)
+        tickers = [t for t, _ in self.children]
+        for t in tickers:
+            Stock(symbol=t)
+        if len(set(tickers)) != len(tickers) or self.parent in tickers:
+            raise ValueError("children must be distinct tickers, none of them the parent")
+        if any(not r > 0 for _, r in self.children):
+            raise ValueError("every child ratio must be positive")
+        if len(self.child_closes) != len(self.children):
+            raise ValueError("child_closes must give one close per child")
+        if any(not c > 0 for c in self.child_closes):
+            raise ValueError("every child close must be positive")
+        handed_out = sum(r * c for (_, r), c in zip(self.children, self.child_closes, strict=True))
+        factor = self.parent_close / (self.parent_close + handed_out)
+        if not math.isclose(self.factor, factor, rel_tol=_SPINOFF_REL_TOL):
+            raise ValueError(f"factor {self.factor} does not match the closes ({factor:.6g})")
+        multiplier = self.factor * self.dividend_factor / self.applied_factor
+        if not math.isclose(self.multiplier, multiplier, rel_tol=_SPINOFF_REL_TOL):
+            raise ValueError(
+                f"multiplier {self.multiplier} is not factor * dividend_factor / "
+                f"applied_factor ({multiplier:.6g})"
+            )
+        return self
+
+    def applied(self) -> SpinOff:
+        return SpinOff(
+            symbol=self.parent,
+            ex_date=self.ex_date,
+            multiplier=self.multiplier,
+            cached_step=self.cached_step,
+        )
+
+
+def _pairs(value: str) -> list[tuple[str, str]]:
+    """`A:1;B:0.5` as [("A", "1"), ("B", "0.5")]."""
+    pairs: list[tuple[str, str]] = []
+    for item in value.split(";"):
+        key, sep, val = item.partition(":")
+        if not sep or not key or not val:
+            raise ValueError(f"{value!r} is not TICKER:VALUE pairs separated by ';'")
+        pairs.append((key, val))
+    return pairs
+
+
+def load_spinoffs(config_dir: Path = DEFAULT_CONFIG_DIR) -> tuple[SpinOffEvent, ...]:
+    """Every row of `config_dir`/corporate-actions/spinoffs.csv, sorted by (parent,
+    ex_date). The file is required: a missing one would silently drop every adjustment.
+    Raises ConfigError naming the file and line on any invalid row."""
+    path = config_dir / SPINOFFS_FILE
+    events: list[SpinOffEvent] = []
+    for n, row in enumerate(_read_csv(path, _SPINOFFS_HEADER), start=2):
+        fields = dict(zip(_SPINOFFS_HEADER, row, strict=True))
+        ex_date = _date(fields["ex_date"], path, n)
+        try:
+            children = _pairs(fields["children"])
+            closes = dict(_pairs(fields["child_closes"]))
+            if [t for t, _ in children] != list(closes):
+                raise ValueError("child_closes must list the same tickers as children, in order")
+            event = SpinOffEvent.model_validate(
+                {
+                    "parent": fields["parent"],
+                    "ex_date": ex_date,
+                    "children": [(t, float(r)) for t, r in children],
+                    "parent_close": float(fields["parent_close"]),
+                    "child_closes": [float(c) for c in closes.values()],
+                    "factor": float(fields["factor"]),
+                    "dividend_factor": float(fields["dividend_factor"]),
+                    "applied_factor": float(fields["applied_factor"]),
+                    "multiplier": float(fields["multiplier"]),
+                    "cached_step": float(fields["cached_step"]),
+                    "note": fields["note"],
+                }
+            )
+        except (ValueError, ValidationError) as exc:  # ValidationError is a ValueError
+            raise ConfigError(f"{path} line {n}: {exc}") from exc
+        events.append(event)
+    keys = [(e.parent, e.ex_date) for e in events]
+    if len(set(keys)) != len(keys):
+        dupes = sorted({k for k in keys if keys.count(k) > 1})
+        raise ConfigError(
+            f"{path}: more than one row for {dupes}; list every child of one day in one row"
+        )
+    return tuple(sorted(events, key=lambda e: (e.parent, e.ex_date)))
+
+
+def _recipe_spinoffs(events: tuple[SpinOffEvent, ...], raw: dict[str, Any]) -> list[SpinOff]:
+    """The events of the symbols this recipe uses (universe and benchmark), so an edit to
+    another symbol's row leaves the recipe unchanged. A malformed universe or benchmark
+    matches nothing here and fails the recipe's own validation."""
+    universe = raw["universe"].get("symbols") if isinstance(raw["universe"], dict) else None
+    backtest = raw["backtest"]
+    own = set(universe) if isinstance(universe, list) else set()
+    if isinstance(backtest, dict) and isinstance(backtest.get("benchmark"), str):
+        own.add(backtest["benchmark"])
+    return [e.applied() for e in events if e.parent in own]
+
+
 def load_execution(config_dir: Path = DEFAULT_CONFIG_DIR) -> ExecutionConfig:
     """The fixed execution settings in `config_dir`/execution.yaml."""
     config_dir = config_dir.resolve()
@@ -649,6 +812,7 @@ def load_recipe(
         execution = load_execution(config_dir)
         raw["risk"] = _read_preset(config_dir, "risk", risk)
         raw["limits"] = execution.limits
+    raw["spinoffs"] = _recipe_spinoffs(load_spinoffs(config_dir), raw)
     try:
         recipe = Recipe.model_validate(raw)
     except ValidationError as exc:
