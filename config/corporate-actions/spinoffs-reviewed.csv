@@ -1,1 +1,246 @@
 ticker,date,note
+WTW,2016-01-05,addition: Willis Group merged with Towers Watson as Willis Towers Watson; not a spin-off
+NOW,2016-01-28,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TRGP,2016-01-29,cash dividend of 0.91 going ex (Alpaca's dividend feed); not a spin-off
+LB,2016-02-17,cash dividend of 2.6 going ex (Alpaca's dividend feed); not a spin-off
+ENPH,2016-02-24,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+VMRK,2016-03-01,cash dividend of 8 going ex (Alpaca's dividend feed under EQR); not a spin-off
+GEN,2016-03-04,cash dividend of 4 going ex (Alpaca's dividend feed under SYMC); not a spin-off
+WMB,2016-03-10,cash dividend of 0.64 going ex (Alpaca's dividend feed); not a spin-off
+ENDP,2016-05-06,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+STX,2016-05-06,cash dividend of 0.63 going ex (Alpaca's dividend feed); not a spin-off
+SMCI,2016-07-19,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+LDOS,2016-08-17,cash dividend of 13.64 going ex (Alpaca's dividend feed); not a spin-off
+JCI,2016-09-06,"Tyco merged with Johnson Controls (Alpaca's JCI history appears to be Tyco's): Tyco's 0.955-for-1 share consolidation, in Alpaca's split feed; cached close continuous; not a spin-off"
+CPT,2016-09-21,cash dividend of 4.25 going ex (Alpaca's dividend feed); not a spin-off
+VMRK,2016-09-22,cash dividend of 3.50375 going ex (Alpaca's dividend feed under EQR); not a spin-off
+ENPH,2016-09-23,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ILMN,2016-10-11,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TDG,2016-10-20,cash dividend of 24 going ex (Alpaca's dividend feed); not a spin-off
+CNC,2016-11-09,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+HLT,2017-01-04,Park Hotels (1 per 5) and Hilton Grand Vacations (1 per 10) with a same-day 1-for-3 reverse split; Alpaca applied all three and the cached close is continuous (54.05 to an open of 55.10); a row cannot be built because the applied factor includes the split
+UA,2017-01-31,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+UAA,2017-01-31,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PANW,2017-03-01,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FTR,2017-03-13,cash dividend of 0.105 going ex (Alpaca's dividend feed); not a spin-off
+LULU,2017-03-30,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+COST,2017-05-08,cash dividend of 7 going ex (Alpaca's dividend feed); not a spin-off
+XRX,2017-06-15,Xerox 1-for-4 reverse split; not a spin-off
+BKR,2017-07-05,addition: GE Oil & Gas combined with Baker Hughes as BHGE; not a spin-off
+FL,2017-08-18,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TDG,2017-08-31,cash dividend of 22 going ex (Alpaca's dividend feed); not a spin-off
+DXCM,2017-09-28,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EVHC,2017-11-01,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+NWL,2017-11-02,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+SIG,2017-11-21,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+LUMN,2017-11-24,cash dividend of 0.54 going ex (Alpaca's dividend feed under CTL); not a spin-off
+LUMN,2018-03-02,cash dividend of 0.54 going ex (Alpaca's dividend feed under CTL); not a spin-off
+JWN,2018-03-27,the gap is back from a bad bar: Alpaca's 2018-03-26 close of 64.13 sits between 46.36 and 47.37; not a spin-off; reported as a data issue
+BEN,2018-03-28,cash dividend of 3.23 going ex (Alpaca's dividend feed); not a spin-off
+INCY,2018-04-06,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FLR,2018-05-04,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+GEN,2018-05-11,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+NKTR,2018-06-04,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EVRG,2018-06-05,addition: Great Plains Energy merged with Westar as Evergy; not a spin-off
+KDP,2018-07-10,cash dividend of 103.75 going ex (Alpaca's dividend feed under DPS); not a spin-off
+NLSN,2018-07-26,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+IPGP,2018-07-31,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+SMCI,2018-08-22,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ALGN,2018-10-25,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+AMD,2018-10-25,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FLEX,2018-10-26,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+LIN,2018-11-06,addition: Praxair merged with Linde plc; not a spin-off
+LITE,2018-11-12,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+MTCH,2018-12-04,cash dividend of 2 going ex (Alpaca's dividend feed); not a spin-off
+PCAR,2018-12-13,cash dividend of 2 going ex (Alpaca's dividend feed); not a spin-off
+PCG,2019-01-07,"PG&E wildfire liabilities and bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PCG,2019-01-14,"PG&E wildfire liabilities and bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PCG,2019-01-15,"PG&E wildfire liabilities and bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PGR,2019-02-01,cash dividend of 2.514 going ex (Alpaca's dividend feed); not a spin-off
+AIV,2019-02-21,Aimco special dividend with a 0.969753-for-1 share consolidation (Alpaca's split feed); cached close moves 2%; not a spin-off
+KHC,2019-02-22,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+BIIB,2019-03-21,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FLR,2019-05-02,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CTVA,2019-06-03,"addition: Corteva, distributed by DowDuPont on 2019-06-03; see the DD 2019-06-03 row"
+DD,2019-06-03,Corteva distribution (1 per DowDuPont share) with a same-day 1-for-3 reverse split; Alpaca applied both and the cached close is continuous (70.48 to an open of 71.66); a row cannot be built because the applied factor includes the split
+AMCR,2019-06-07,addition: Amcor plc listed on the NYSE on its Bemis acquisition; not a spin-off
+ALGN,2019-07-25,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ABMD,2019-08-01,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+DXC,2019-08-09,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+NKTR,2019-08-09,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TDG,2019-08-15,cash dividend of 30 going ex (Alpaca's dividend feed); not a spin-off
+PCG,2019-08-19,"PG&E wildfire liabilities and bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ULTA,2019-08-30,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PCG,2019-10-10,"PG&E wildfire liabilities and bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PCG,2019-10-28,"PG&E wildfire liabilities and bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ANET,2019-11-01,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TRIP,2019-11-19,cash dividend of 3.5 going ex (Alpaca's dividend feed); not a spin-off
+VIAC,2019-12-05,addition: CBS merged with Viacom as ViacomCBS; not a spin-off
+PCG,2019-12-16,"PG&E wildfire liabilities and bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TDG,2019-12-27,cash dividend of 32.5 going ex (Alpaca's dividend feed); not a spin-off
+TKO,2020-01-31,"WWE (Alpaca files WWE's history under TKO): earnings and management change; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+GEN,2020-02-03,cash dividend of 12 going ex (Alpaca's dividend feed under NLOK); not a spin-off
+IR,2020-03-02,"Ingersoll Rand Inc. (Gardner Denver) received the Ingersoll-Rand plc industrial business; IR distributed nothing, but Alpaca applied TT's 0.8824 'split' to IR as well, so the cached IR close falls 11.7% while raw is flat. No spin-off row can correct it; reported as a data issue"
+APA,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+COP,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CXO,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+DVN,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EOG,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EQT,2020-03-09,2020-03-09 oil price collapse and COVID sell-off; not a spin-off
+EXE,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FANG,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+HAL,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+HES,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+HP,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+MRO,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+NBL,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+NOV,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+OKE,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+OXY,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PXD,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+SLB,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TRGP,2020-03-09,"2020-03-09 oil price collapse and COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+M,2020-03-12,cash dividend of 0.3775 going ex (Alpaca's dividend feed); not a spin-off
+NCLH,2020-03-12,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+RCL,2020-03-12,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ADS,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+BLDR,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+C,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CBRE,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CPRI,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CXO,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CZR,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EXE,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FTI,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+KEY,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+LNC,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+OXY,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PHM,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ROP,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+XRX,2020-03-16,"COVID sell-off; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+KSS,2020-03-17,cash dividend of 0.704 going ex (Alpaca's dividend feed); not a spin-off
+KIM,2020-04-01,cash dividend of 0.28 going ex (Alpaca's dividend feed); not a spin-off
+HWM,2020-04-06,"addition: Howmet is Arconic Inc. renamed; Alpaca's HWM bars begin 2020-04-01 (the Arconic Corp. ex-date) and the earlier history is under ARNC, so no HWM bar spans the spin-off and nothing needs adjusting"
+GPS,2020-04-07,cash dividend of 0.2425 going ex (Alpaca's dividend feed); not a spin-off
+EXE,2020-04-15,"Chesapeake Energy (Alpaca files CHK's history under EXE): 1-for-200 reverse split, in Alpaca's split feed under CHK, and a real fall that day; not a spin-off"
+OKE,2020-04-24,cash dividend of 0.935 going ex (Alpaca's dividend feed); not a spin-off
+EXE,2020-04-30,"Chesapeake Energy (Alpaca files CHK's history under EXE) before its 2020 bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+HP,2020-05-08,cash dividend of 0.71 going ex (Alpaca's dividend feed); not a spin-off
+EXE,2020-06-09,"Chesapeake Energy (Alpaca files CHK's history under EXE) before its 2020 bankruptcy; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+OKE,2020-07-31,cash dividend of 0.935 going ex (Alpaca's dividend feed); not a spin-off
+CIEN,2020-09-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+OKE,2020-10-30,cash dividend of 0.935 going ex (Alpaca's dividend feed); not a spin-off
+AIV,2020-11-03,"Aimco special dividend of 8.20, listed twice in Alpaca's dividend feed; Alpaca's adjustment (0.5548) does not match it and the cached close jumps 39%; not a spin-off; reported as a data issue"
+SEDG,2020-11-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+BIIB,2020-11-09,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+AIV,2020-12-01,Aimco share consolidation of 0.807617 in Alpaca's split feed with no matching raw move (cached close +4%); not a spin-off; reported as a data issue
+SLG,2020-12-14,cash dividend of 4 going ex (Alpaca's dividend feed); not a spin-off
+PGR,2021-01-07,cash dividend of 4.6 going ex (Alpaca's dividend feed); not a spin-off
+GE,2021-08-02,GE 1-for-8 reverse split; not a spin-off
+BBWI,2021-08-03,"addition: L Brands renamed Bath & Body Works on the Victoria's Secret ex-date; Alpaca's LB bars end 2021-08-02 and BBWI's begin 2021-08-03, so no bar spans the spin-off and nothing needs adjusting"
+GPS,2021-11-24,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+WTW,2021-12-30,no corporate action found: raw close continuous (238.43 to 237.12) while Alpaca's adjusted close rises 3.8% (the 0.80 dividend explains 0.3%); an adjustment artifact; not a spin-off
+NFLX,2022-01-21,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TER,2022-01-27,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PYPL,2022-02-02,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+META,2022-02-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+WY,2022-02-17,cash dividend of 1.45 going ex (Alpaca's dividend feed); not a spin-off
+CSGP,2022-02-23,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+VRT,2022-02-23,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+NFLX,2022-04-20,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ALGN,2022-04-28,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+UA,2022-05-06,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+UAA,2022-05-06,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+COIN,2022-05-11,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TGT,2022-05-18,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ROST,2022-05-20,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+LYB,2022-06-03,cash dividend of 6.39 going ex (Alpaca's dividend feed); not a spin-off
+COIN,2022-06-13,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PSA,2022-07-29,cash dividend of 13.15 going ex (Alpaca's dividend feed); not a spin-off
+MTCH,2022-08-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PXD,2022-09-02,cash dividend of 8.57 going ex (Alpaca's dividend feed); not a spin-off
+FDX,2022-09-16,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+META,2022-10-27,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+DVA,2022-10-28,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CTLT,2022-11-01,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+LNC,2022-11-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EXE,2022-11-14,cash dividend of 3.16 going ex (Alpaca's dividend feed under CHK); not a spin-off
+CVNA,2022-12-07,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+F,2023-02-10,cash dividend of 0.8 going ex (Alpaca's dividend feed); not a spin-off
+SIVB,2023-03-09,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FRC,2023-03-10,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CMA,2023-03-13,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FRC,2023-03-13,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+KEY,2023-03-13,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+RF,2023-03-13,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ZION,2023-03-13,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FRC,2023-03-15,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FRC,2023-03-16,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CTLT,2023-04-14,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FRC,2023-04-25,"March 2023 regional bank failures; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EL,2023-05-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CTLT,2023-05-08,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+AAP,2023-05-31,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ZBRA,2023-08-01,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+DXC,2023-08-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FTNT,2023-08-04,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+DDOG,2023-08-08,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+IFF,2023-08-08,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+COHR,2023-08-16,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TKO,2023-09-21,cash dividend of 3.86 going ex (Alpaca's dividend feed); not a spin-off
+SEDG,2023-10-20,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FMC,2023-10-23,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ALGN,2023-10-26,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PAYC,2023-11-01,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FTNT,2023-11-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TDG,2023-11-17,cash dividend of 35 going ex (Alpaca's dividend feed); not a spin-off
+PCAR,2023-12-14,cash dividend of 3.2 going ex (Alpaca's dividend feed); not a spin-off
+DAY,2024-02-01,addition: Ceridian changed its ticker from CDAY to DAY; Alpaca's DAY bars begin that day; not a spin-off
+PANW,2024-02-21,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EPAM,2024-05-09,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+LW,2024-07-24,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EW,2024-07-25,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+DXCM,2024-07-26,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+INTC,2024-08-02,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+COIN,2024-08-05,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+DG,2024-08-29,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+HUM,2024-10-02,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TDG,2024-10-04,cash dividend of 75 going ex (Alpaca's dividend feed); not a spin-off
+QRVO,2024-10-30,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+SMCI,2024-10-30,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EL,2024-10-31,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+SMCI,2024-11-06,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ACGL,2024-11-18,cash dividend of 5 going ex (Alpaca's dividend feed); not a spin-off
+MRNA,2025-01-13,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+LEN,2025-01-21,"Millrose (1 per 2 shares) went ex 2025-01-21 but traded regular-way only from February: Alpaca has no MRP bar on the ex-date, so f cannot be measured. Alpaca applied 0.9155; the cached close rose 2.7% that day while raw fell 5.9%, consistent with a correct adjustment"
+VRT,2025-01-27,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FMC,2025-02-05,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+SWKS,2025-02-06,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TTD,2025-02-13,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+WST,2025-02-13,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+F,2025-02-18,cash dividend of 0.3 going ex (Alpaca's dividend feed); not a spin-off
+CE,2025-02-19,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+XYZ,2025-05-02,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ENPH,2025-05-22,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+DECK,2025-05-23,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ENPH,2025-06-17,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FSLR,2025-06-17,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CNC,2025-07-02,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+ALGN,2025-07-31,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+IT,2025-08-05,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FTNT,2025-08-07,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PSKY,2025-08-08,addition: Paramount merged with Skydance as Paramount Skydance; not a spin-off
+TTD,2025-08-08,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+COHR,2025-08-14,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+TDG,2025-09-02,cash dividend of 180 going ex (Alpaca's dividend feed); not a spin-off
+SNPS,2025-09-10,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+KMX,2025-09-25,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+FISV,2025-10-29,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+CMG,2025-10-30,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+AXON,2025-11-05,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+PGR,2026-01-02,cash dividend of 13.6 going ex (Alpaca's dividend feed); not a spin-off
+AMCR,2026-01-15,Amcor 1-for-5 reverse split; not a spin-off
+IT,2026-02-03,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+MOH,2026-02-06,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+EPAM,2026-02-19,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+SMCI,2026-03-20,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"

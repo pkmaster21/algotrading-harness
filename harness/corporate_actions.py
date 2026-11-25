@@ -20,17 +20,31 @@ ex-date or the session before) unless that event is listed with a note in
 `spinoffs-reviewed.csv`; when a child has no ex-date bar and no close given by hand;
 or when an event is dated in the holdout and has not been built with `--holdout`.
 
-The audit (which events belong in the list) is not here yet: until it lands, coverage
-is only the events listed by hand.
-
 Run it by hand when the list changes or Alpaca's adjustment of an event changes (a
 guard fired). It is not part of any run: runs read the resolved file only, and the
 thresholds and lists here never enter a recipe.
+
+`python -m harness.corporate_actions audit [--out FILE]` finds the events
+that belong in the list (decision 8). Over every bar a run can read of every symbol in
+every universe file and the benchmark, it lists candidates from four Alpaca sources:
+
+- every spin-off in Alpaca's feed, after dropping warrants, rights, CVRs and
+  when-issued tickers;
+- every step of more than 3% in the adjusted-to-raw close ratio that is not a split in
+  Alpaca's split feed;
+- every open gap down of 20% or more in the adjusted bars;
+- every addition to a point-in-time universe within 5 sessions of the ticker's first
+  bar (spin-offs often join the index on day one).
+
+It exits non-zero until each candidate (ticker, date) is a parent's ex-date in
+spinoffs.csv (an addition: a child's, within 5 sessions), or a row in
+spinoffs-reviewed.csv with a note. SEC Form 10 filings, the fifth source, come later.
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import datetime as dt
 import math
@@ -38,8 +52,10 @@ import os
 import sys
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 from pydantic import Field, ValidationError, model_validator
@@ -48,15 +64,20 @@ from harness.config import (
     DEFAULT_CONFIG_DIR,
     SPINOFFS_FILE,
     SPINOFFS_HEADER,
+    BadBars,
     ConfigError,
     SpinOffEvent,
     load_data_settings,
+    load_universe,
     read_spinoffs,
     spinoff_fields,
+    universe_names,
 )
 from harness.data import (
+    Actions,
     DataError,
     DataLoader,
+    FeedSpinOff,
     HoldoutAccess,
     HoldoutLogError,
     HoldoutViolation,
@@ -409,6 +430,324 @@ def build(
     )
 
 
+# --------------------------------------------------------------------------- audit
+
+# What a person reviews, not what a run does: these never enter a recipe (decision 8).
+STEP_THRESHOLD = 0.03  # |a - 1| above this, a not a split: a real change of adjustment
+GAP_THRESHOLD = 0.20  # an open this far below the close before it
+ADDITION_SESSIONS = 5  # a universe addition this close to the ticker's first bar
+# Child tickers in the feed that are not shares of a new company.
+_SPLIT_TOLERANCE = 5e-4  # relative: a split feed ratio this close to a simple one is a split
+_NOT_SHARES = (".WI", ".WS", ".WT", ".RT", ".U", "WI", "CVR")
+
+Source = Literal["feed", "step", "gap", "addition"]
+
+
+class Candidate(FrozenModel):
+    """One lead for a person to review: `ticker` (as the universe files name it) may
+    have a spin-off going ex on `date`."""
+
+    ticker: str
+    date: dt.date
+    source: Source
+    detail: str
+
+
+class AuditResult(FrozenModel):
+    start: dt.date
+    end: dt.date
+    candidates: tuple[Candidate, ...]
+    listed: tuple[tuple[str, dt.date], ...]  # covered by a row of spinoffs.csv
+    reviewed: tuple[tuple[str, dt.date], ...]  # covered by a row of spinoffs-reviewed.csv
+    open: tuple[tuple[str, dt.date], ...]  # neither: the audit fails
+    unused: tuple[Reviewed, ...]  # reviewed rows that match no candidate and no listed event
+
+    def by_key(self) -> dict[tuple[str, dt.date], list[Candidate]]:
+        out: dict[tuple[str, dt.date], list[Candidate]] = {}
+        for c in self.candidates:
+            out.setdefault((c.ticker, c.date), []).append(c)
+        return out
+
+
+@dataclass
+class _Scope:
+    """Which bars a run can read: a fixed-list symbol's (and the benchmark's) from the
+    data start; a point-in-time member's from the data start to its last day in the
+    index, outside its bad-bar windows. Bars after a member leaves are never read."""
+
+    start: dt.date
+    end: dt.date  # inclusive
+    fixed: set[str] = field(default_factory=set[str])
+    last_day: dict[str, dt.date | None] = field(default_factory=dict[str, dt.date | None])
+    bad: dict[str, list[BadBars]] = field(default_factory=dict[str, list[BadBars]])
+    aliases: dict[str, str] = field(default_factory=dict[str, str])  # old ticker -> new
+    additions: list[tuple[str, str, dt.date]] = field(
+        default_factory=list[tuple[str, str, dt.date]]
+    )  # (universe, ticker, first session in)
+
+    @property
+    def symbols(self) -> list[str]:
+        return sorted(self.fixed | set(self.last_day))
+
+    def covers(self, symbol: str, day: dt.date) -> bool:
+        if not self.start <= day <= self.end:
+            return False
+        if symbol in self.fixed:
+            return True
+        if symbol not in self.last_day:
+            return False
+        last = self.last_day[symbol]
+        if last is not None and day >= last:  # `end` of an interval is the first day out
+            return False
+        return not any(
+            (b.start is None or b.start <= day) and (b.end is None or day < b.end)
+            for b in self.bad.get(symbol, [])
+        )
+
+
+def _scope(config_dir: Path, start: dt.date, end: dt.date, benchmark: str) -> _Scope:
+    scope = _Scope(start=start, end=end, fixed={benchmark})
+    for name in universe_names(config_dir):
+        universe = load_universe(name, config_dir)
+        if universe.membership is None:
+            scope.fixed.update(universe.symbols)
+            continue
+        m = universe.membership
+        for iv in m.intervals:
+            scope.additions.append((name, iv.symbol, iv.start))
+            if iv.symbol in scope.last_day and scope.last_day[iv.symbol] is None:
+                continue  # already a member through today
+            prev = scope.last_day.get(iv.symbol)
+            scope.last_day[iv.symbol] = None if iv.end is None else max(iv.end, prev or iv.end)
+        for b in m.bad_bars:
+            scope.bad.setdefault(b.symbol, []).append(b)
+        scope.aliases.update({r.old: r.new for r in m.renames})
+    return scope
+
+
+def _is_share(row: FeedSpinOff) -> bool:
+    """A feed row whose child looks like shares of another company (decision 8)."""
+    source, child = row.source, row.child
+    if child == source or any(ch.isdigit() for ch in child):
+        return False  # a CUSIP (CVRs, contingent rights) or the parent itself
+    if any(child.endswith(suffix) for suffix in _NOT_SHARES):
+        return False
+    # A Nasdaq warrant or right: the parent's ticker plus W, R, Z or L.
+    return not (child[:-1] == source and child[-1] in "WRZL")
+
+
+def _is_split(ratio: float) -> bool:
+    """A split feed ratio that excuses an adjustment step: a forward split of n for 1, or
+    p for q with both at most 10 (3 for 2). Alpaca's split feed also holds spin-offs
+    before 2021, as "splits" of the factor (DHR 2016-07-05 is 1.319, HPE 2017-04-03 is
+    1.3348) or as reverse splits of the distribution ratio (WRK 2016-05-16 is 1 for 6,
+    EQT 2018-11-13 is 4 for 5), so those stay candidates. Real reverse splits are rare
+    in these universes, and a reviewed row settles each."""
+    if ratio < 1:
+        return False
+    if abs(ratio - round(ratio)) <= _SPLIT_TOLERANCE * ratio:
+        return True
+    return any(
+        abs(ratio - p / q) <= _SPLIT_TOLERANCE * ratio for p in range(1, 11) for q in range(1, 11)
+    )
+
+
+def candidates(
+    scope: _Scope,
+    actions: Actions,
+    adjusted: dict[str, pd.DataFrame],
+    raw: dict[str, pd.DataFrame],
+    calendar: str,
+) -> list[Candidate]:  # fmt: skip
+    """Every lead from the four Alpaca sources, inside `scope`, sorted by (date, ticker,
+    source). Pure: the frames and feed rows are given."""
+    out: list[Candidate] = []
+    known = set(scope.symbols)
+
+    def ticker(symbol: str) -> str | None:
+        if symbol in known:
+            return symbol
+        new = scope.aliases.get(symbol)
+        return new if new in known else None
+
+    for row in actions.spinoffs:
+        t = ticker(row.source)
+        if t is None or not _is_share(row) or not scope.covers(t, row.ex_date):
+            continue
+        ratio = row.new_rate / row.source_rate if row.source_rate > 0 else row.new_rate
+        out.append(
+            Candidate(
+                ticker=t,
+                date=row.ex_date,
+                source="feed",
+                detail=f"feed: {row.source} -> {row.child} {ratio:.6g} per share",
+            )
+        )
+    splits: dict[tuple[str, dt.date], float] = {}
+    for split in actions.splits:
+        if (t := ticker(split.symbol)) is not None:
+            splits[(t, split.ex_date)] = split.ratio
+
+    bench = adjusted.get(calendar)
+    bench_gap: dict[dt.date, float] = {}
+    if bench is not None and not bench.empty:
+        gaps = bench["open"] / bench["close"].shift(1) - 1
+        bench_gap = {d: float(g) for d, g in zip(bench["date"], gaps, strict=True) if g == g}
+    sessions = sorted(raw[calendar]["date"]) if calendar in raw else []
+
+    for symbol in scope.symbols:
+        adj = adjusted.get(symbol)
+        if adj is None or adj.empty:
+            continue
+        dates = list(adj["date"])
+        gaps = adj["open"] / adj["close"].shift(1) - 1
+        moves = adj["close"] / adj["close"].shift(1) - 1
+        for i in range(1, len(dates)):
+            day, gap = dates[i], float(gaps.iloc[i])
+            if (
+                gap <= -GAP_THRESHOLD
+                and scope.covers(symbol, day)
+                and scope.covers(symbol, dates[i - 1])
+            ):
+                spy = bench_gap.get(day)
+                market = f", {calendar} {spy:+.1%}" if spy is not None else ""
+                out.append(
+                    Candidate(
+                        ticker=symbol,
+                        date=day,
+                        source="gap",
+                        detail=f"gap: open {gap:+.1%} (close {float(moves.iloc[i]):+.1%}"
+                        f"{market}) after {dates[i - 1]}",
+                    )
+                )
+        rw = raw.get(symbol)
+        if rw is None or rw.empty:
+            continue
+        both = adj[["date", "close"]].merge(rw[["date", "close"]], on="date", suffixes=("", "_raw"))
+        both = both[(both["close"] > 0) & (both["close_raw"] > 0)].reset_index(drop=True)
+        ratio = both["close"] / both["close_raw"]
+        steps = ratio.shift(1) / ratio
+        for i in range(1, len(both)):
+            day, step = both["date"].iloc[i], float(steps.iloc[i])
+            split = splits.get((symbol, day))
+            if abs(step - 1) <= STEP_THRESHOLD:
+                continue
+            # A split excuses only the step it explains: a split Alpaca applied wrongly,
+            # or a split and a spin-off on one day, leaves a step of another size.
+            if split is not None and _is_split(split) and abs(step * split - 1) <= STEP_THRESHOLD:
+                continue
+            if scope.covers(symbol, day):
+                listed = "" if split is None else f" (the split feed lists {split:.6g})"
+                out.append(
+                    Candidate(
+                        ticker=symbol,
+                        date=day,
+                        source="step",
+                        detail=f"step: Alpaca applied {step:.4f} after "
+                        f"{both['date'].iloc[i - 1]}{listed}",
+                    )
+                )
+
+    for universe, symbol, joined in scope.additions:
+        rw = raw.get(symbol)
+        if rw is None or rw.empty or not sessions or joined < sessions[0]:
+            continue
+        if not scope.start <= joined <= scope.end:
+            continue
+        first = min(rw["date"])
+        if first <= sessions[0]:
+            continue  # listed before the data begins: its first bar says nothing
+        apart = abs(bisect.bisect_left(sessions, joined) - bisect.bisect_left(sessions, first))
+        if apart <= ADDITION_SESSIONS:
+            out.append(
+                Candidate(
+                    ticker=symbol,
+                    date=joined,
+                    source="addition",
+                    detail=f"addition: joined {universe} {joined}, first bar {first}",
+                )
+            )
+    return sorted(out, key=lambda c: (c.date, c.ticker, c.source))
+
+
+def audit(
+    config_dir: Path,
+    loader: DataLoader,
+    calendar: str,
+) -> AuditResult:
+    """List every candidate in the data range, through the day before the holdout start,
+    and sort them into covered by spinoffs.csv, covered by spinoffs-reviewed.csv, and
+    open. The audit never reads the holdout: it is not a holdout route (decided by David,
+    2026-11-25; PR 4 may add one)."""
+    start = loader.dates.data_start
+    end = loader.cutoff(None) - dt.timedelta(days=1)
+    scope = _scope(config_dir, start, end, calendar)
+    events = read_spinoffs(config_dir / SPINOFFS_FILE)
+    listed_events = {(e.parent, e.ex_date) for e in load_events(config_dir)}
+    reviewed = load_reviewed(config_dir)
+    actions = loader.actions(start, end)
+    window = loader.window([calendar, *scope.symbols], start, end)
+    found = candidates(scope, actions, window.adjusted, window.raw, calendar)
+
+    sessions = sorted(window.raw[calendar]["date"]) if calendar in window.raw else []
+    parents = {(e.parent, e.ex_date) for e in events}
+    children: dict[str, list[dt.date]] = {}
+    for e in events:
+        for t, _ in e.children:
+            children.setdefault(t, []).append(e.ex_date)
+
+    def near(a: dt.date, b: dt.date) -> bool:
+        i, j = bisect.bisect_left(sessions, a), bisect.bisect_left(sessions, b)
+        return abs(i - j) <= ADDITION_SESSIONS
+
+    keys: dict[tuple[str, dt.date], list[Candidate]] = {}
+    for c in found:
+        keys.setdefault((c.ticker, c.date), []).append(c)
+    listed, acknowledged, open_ = [], [], []
+    for key, group in keys.items():
+        ticker, day = key
+        as_child = all(c.source == "addition" for c in group) and any(
+            near(day, ex) for ex in children.get(ticker, [])
+        )
+        if key in parents or as_child:
+            listed.append(key)
+        elif key in reviewed:
+            acknowledged.append(key)
+        else:
+            open_.append(key)
+    unused = [r for k, r in reviewed.items() if k not in keys and k not in listed_events]
+    return AuditResult(
+        start=start,
+        end=end,
+        candidates=tuple(found),
+        listed=tuple(sorted(listed, key=lambda k: (k[1], k[0]))),
+        reviewed=tuple(sorted(acknowledged, key=lambda k: (k[1], k[0]))),
+        open=tuple(sorted(open_, key=lambda k: (k[1], k[0]))),
+        unused=tuple(sorted(unused, key=lambda r: (r.date, r.ticker))),
+    )
+
+
+_WORKSHEET_HEADER = ["ticker", "date", "sources", "detail"]
+
+
+def write_worksheet(path: Path, result: AuditResult) -> None:
+    """The open candidates as a CSV, one row per (ticker, date), for the review."""
+    groups = result.by_key()
+    with path.open("w", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(_WORKSHEET_HEADER)
+        for key in result.open:
+            group = groups[key]
+            writer.writerow(
+                [
+                    key[0],
+                    key[1].isoformat(),
+                    ";".join(dict.fromkeys(c.source for c in group)),
+                    "; ".join(c.detail for c in group),
+                ]
+            )
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -434,6 +773,34 @@ def _report(result: BuildResult, previous: dict[tuple[str, dt.date], SpinOffEven
         print(f"{e.parent} {e.ex_date}: removed (no longer listed)")
 
 
+def _report_audit(result: AuditResult) -> int:
+    counts = {src: 0 for src in ("feed", "step", "gap", "addition")}
+    for c in result.candidates:
+        counts[c.source] += 1
+    pairs = len(result.listed) + len(result.reviewed) + len(result.open)
+    print(
+        f"audit {result.start}..{result.end}: {len(result.candidates)} candidate(s) "
+        f"({', '.join(f'{k} {v}' for k, v in counts.items())}) on {pairs} (ticker, date) pair(s)"
+    )
+    print(
+        f"  in spinoffs.csv: {len(result.listed)}; reviewed: {len(result.reviewed)}; "
+        f"open: {len(result.open)}"
+    )
+    for r in result.unused:
+        print(f"  note: reviewed row {r.ticker} {r.date} matches no candidate")
+    if not result.open:
+        return 0
+    groups = result.by_key()
+    print(
+        f"open: list each in {EVENTS_FILE} and build, or add it to {REVIEWED_FILE} with a note",
+        file=sys.stderr,
+    )
+    for ticker, day in result.open:
+        details = "; ".join(c.detail for c in groups[(ticker, day)])
+        print(f"  {day} {ticker:<6} {details}", file=sys.stderr)
+    return 1
+
+
 def main(
     argv: Sequence[str] | None = None,
     config_dir: Path = DEFAULT_CONFIG_DIR,
@@ -441,7 +808,8 @@ def main(
     loader: DataLoader | None = None,  # tests pass one with fake fetchers
 ) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m harness.corporate_actions", description="Build spinoffs.csv."
+        prog="python -m harness.corporate_actions",
+        description="Build spinoffs.csv, or audit which events belong in it.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     build_cmd = commands.add_parser("build", help="resolve the listed spin-offs into spinoffs.csv")
@@ -450,24 +818,35 @@ def main(
         action="store_true",
         help="also measure events dated in the holdout (each logged in the holdout log)",
     )
+    audit_cmd = commands.add_parser(
+        "audit", help="list candidate spin-offs; fail until each is listed or reviewed"
+    )
+    audit_cmd.add_argument(
+        "--out", type=Path, help="write the open candidates to this CSV, for the review"
+    )
     args = parser.parse_args(argv)
     try:
         settings = load_data_settings(config_dir)
         loader = loader or DataLoader(settings.dates, settings.data)
         holdout = None
-        if args.holdout:
+        if args.command == "build" and args.holdout:
             stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
             holdout = HoldoutAccess(
-                run_id=f"spinoff-build-{stamp}",
-                strategy="spinoff-build",
+                run_id=f"spinoff-{args.command}-{stamp}",
+                strategy=f"spinoff-{args.command}",
                 git_commit=_git_commit(config_dir.resolve().parent),
             )
+        if args.command == "audit":
+            found = audit(config_dir, loader, settings.benchmark)
+            if args.out is not None:
+                write_worksheet(args.out, found)
+            return _report_audit(found)
         previous = {(e.parent, e.ex_date): e for e in read_spinoffs(config_dir / SPINOFFS_FILE)}
         result = build(config_dir, loader, settings.benchmark, holdout=holdout)
     except BuildError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except (ConfigError, DataError, HoldoutLogError, HoldoutViolation) as exc:
+    except (ConfigError, DataError, HoldoutLogError, HoldoutViolation, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     _report(result, previous)

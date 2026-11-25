@@ -471,6 +471,142 @@ class Window:
     dividends: dict[str, list[tuple[dt.date, float]]]
 
 
+class FeedSpinOff(FrozenModel):
+    """A spin-off row of Alpaca's corporate actions feed, as Alpaca lists it: tickers on
+    the day, `new_rate` child shares per `source_rate` parent shares. The feed is a lead
+    to review, not a source of truth: it also lists warrants, rights, CVRs and
+    when-issued tickers, and some rows are wrong (docs/spinoff-design.md)."""
+
+    source: str
+    child: str
+    ex_date: dt.date
+    source_rate: float
+    new_rate: float
+
+
+class Split(FrozenModel):
+    """A forward or reverse split in Alpaca's feed: `ratio` new shares per old share."""
+
+    symbol: str
+    ex_date: dt.date
+    ratio: float = Field(gt=0)
+
+
+@dataclass(frozen=True, slots=True)
+class Actions:
+    """Spin-offs and splits from Alpaca's feed, for the spin-off audit."""
+
+    spinoffs: tuple[FeedSpinOff, ...]
+    splits: tuple[Split, ...]
+
+
+class ActionsFetcher(Protocol):
+    """Source of spin-offs and splits. AlpacaActionsFetcher in production, fakes in tests."""
+
+    def actions(self, start: dt.date, end: dt.date) -> Actions:
+        """Every spin-off and split, of any symbol, going ex in [start, end]."""
+        ...
+
+
+class AlpacaActionsFetcher:
+    """Spin-offs and forward and reverse splits from Alpaca's corporate actions API
+    (read-only), for the spin-off audit (`harness.corporate_actions`). Keys are read as
+    `AlpacaBarFetcher` reads them.
+
+    Alpaca selects corporate actions by their process date, which for a spin-off can be
+    years after the ex-date (EXC to CEG, ex 2022-02-02, was processed 2024-12-12) and is
+    sometimes a little before it. So the requests run from a year before `start`
+    through today, one per calendar year, and the rows are then kept by ex-date.
+
+    For an in-sample audit that reach asks for rows processed in the holdout. Rows going
+    ex after `end` are dropped here, before anything reads them, as
+    `AlpacaDividendFetcher` drops dividend rows: capping the requests at the cutoff
+    would miss events processed late, and a missed one is never reviewed. This reach,
+    wider than the dividend request's 120 days, was accepted by David (2026-11-25).
+    """
+
+    _PROCESS_LEAD = dt.timedelta(days=366)
+
+    def __init__(
+        self,
+        cfg: DataConfig,
+        limiter: RateLimiter,
+        dotenv_path: Path = PROJECT_ROOT / ".env",
+        today: Callable[[], dt.date] = lambda: dt.datetime.now(MARKET_TZ).date(),
+    ) -> None:
+        from alpaca.data.historical.corporate_actions import CorporateActionsClient
+
+        try:
+            keys = read_alpaca_paper_keys(dotenv_path)
+        except KeysError as exc:
+            raise DataError(f"{exc} to download corporate actions") from None
+        self._limiter = limiter
+        self._today = today
+        self._client = CorporateActionsClient(api_key=keys.key_id, secret_key=keys.secret_key)
+
+    def actions(self, start: dt.date, end: dt.date) -> Actions:
+        from alpaca.data.enums import CorporateActionsType
+        from alpaca.data.models.corporate_actions import ForwardSplit, ReverseSplit, SpinOff
+        from alpaca.data.requests import CorporateActionsRequest
+
+        first, today = start - self._PROCESS_LEAD, self._today()
+        spinoffs: list[FeedSpinOff] = []
+        splits: list[Split] = []
+        for year in range(first.year, today.year + 1):
+            self._limiter.acquire(1)
+            request = CorporateActionsRequest(
+                types=[
+                    CorporateActionsType.SPIN_OFF,
+                    CorporateActionsType.FORWARD_SPLIT,
+                    CorporateActionsType.REVERSE_SPLIT,
+                ],
+                start=max(first, dt.date(year, 1, 1)),
+                end=min(today, dt.date(year, 12, 31)),
+            )
+            try:
+                response = self._client.get_corporate_actions(request)
+            except Exception as exc:  # network, auth, plan limits: surface with context
+                raise DataError(
+                    f"Alpaca corporate actions request failed for {year}: {exc}"
+                ) from exc
+            data: Any = getattr(response, "data", None)
+            if not isinstance(data, dict):
+                raise DataError(f"unexpected response type from Alpaca: {type(response).__name__}")
+            for items in data.values():
+                for item in items:
+                    ex_date = getattr(item, "ex_date", None)
+                    if not isinstance(ex_date, dt.date) or not start <= ex_date <= end:
+                        continue
+                    if isinstance(item, SpinOff):
+                        spinoffs.append(
+                            FeedSpinOff(
+                                source=item.source_symbol,
+                                child=item.new_symbol,
+                                ex_date=ex_date,
+                                source_rate=item.source_rate,
+                                new_rate=item.new_rate,
+                            )
+                        )
+                    elif isinstance(item, ForwardSplit | ReverseSplit):
+                        if not item.old_rate > 0 or not item.new_rate > 0:  # False for NaN
+                            raise DataError(
+                                f"{item.symbol}: Alpaca lists a split going ex {ex_date} with "
+                                f"rates {item.new_rate!r} for {item.old_rate!r}"
+                            )
+                        splits.append(
+                            Split(
+                                symbol=item.symbol,
+                                ex_date=ex_date,
+                                ratio=item.new_rate / item.old_rate,
+                            )
+                        )
+        # The same row can come back from two years' requests: keep one of each.
+        return Actions(
+            spinoffs=tuple(sorted(set(spinoffs), key=lambda r: (r.ex_date, r.source, r.child))),
+            splits=tuple(sorted(set(splits), key=lambda r: (r.ex_date, r.symbol))),
+        )
+
+
 # --------------------------------------------------------------------------- cache
 
 # 2: a symbol that a multi-symbol request returned empty is refetched alone (issue #56),
@@ -583,6 +719,7 @@ class DataLoader:
         fetcher_factory: Callable[[], BarFetcher] | None = None,
         now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
         dividend_factory: Callable[[], DividendFetcher] | None = None,
+        actions_factory: Callable[[], ActionsFetcher] | None = None,
     ) -> None:
         self.dates = dates
         self.cfg = cfg
@@ -594,6 +731,10 @@ class DataLoader:
             lambda: AlpacaDividendFetcher(cfg, self._limiter)
         )
         self._dividends: DividendFetcher | None = None
+        self._actions_factory = actions_factory or (
+            lambda: AlpacaActionsFetcher(cfg, self._limiter)
+        )
+        self._actions: ActionsFetcher | None = None
         self._now = now
 
     # ------------------------------------------------------------------ cutoff
@@ -722,6 +863,31 @@ class DataLoader:
                 raise DataError(f"{symbol}: fetcher returned dividends outside {start}..{end}")
             paid[symbol] = rows
         return Window(adjusted=adjusted, raw=raw, dividends=paid)
+
+    def actions(
+        self, start: dt.date, end: dt.date, *, holdout: HoldoutAccess | None = None
+    ) -> Actions:
+        """Alpaca's spin-offs and splits going ex in [start, end], fetched now and not
+        cached. For the spin-off audit (`harness.corporate_actions`).
+
+        The cutoff is the same as `load`'s: a range reaching the holdout start is refused
+        (HoldoutViolation) unless `holdout` is given, and then the holdout log line is
+        appended first.
+        """
+        cutoff = self.cutoff(holdout)
+        if end >= cutoff:
+            raise HoldoutViolation(
+                f"refusing to request corporate actions through {end} (cutoff {cutoff})"
+            )
+        if holdout is not None:
+            self._log_holdout(holdout, start, end)
+        if self._actions is None:
+            self._actions = self._actions_factory()
+        result = self._actions.actions(start, end)
+        days = [r.ex_date for r in result.spinoffs] + [r.ex_date for r in result.splits]
+        if any(not start <= d <= end for d in days):
+            raise DataError(f"fetcher returned corporate actions outside {start}..{end}")
+        return result
 
     def _log_holdout(self, access: HoldoutAccess, start: dt.date, end: dt.date) -> None:
         path = self.cfg.holdout_log
