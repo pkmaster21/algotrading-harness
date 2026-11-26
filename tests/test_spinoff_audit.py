@@ -16,7 +16,7 @@ import pytest
 
 from harness import corporate_actions
 from harness.config import load_data_settings, load_universe, universe_names
-from harness.corporate_actions import EVENTS_FILE, REVIEWED_FILE, audit
+from harness.corporate_actions import EVENTS_FILE, FORM10_REVIEWED_FILE, REVIEWED_FILE, audit
 from harness.data import (
     Actions,
     AlpacaActionsFetcher,
@@ -27,7 +27,9 @@ from harness.data import (
     Split,
 )
 from harness.ratelimit import RateLimiter
+from harness.sec import Form10Index
 from tests.fake_alpaca import NOW, REPO_CONFIG, spinoff_row, tmp_config
+from tests.fake_sec import FakeSec
 
 START = dt.date(2025, 10, 1)  # tmp_config's data start
 END = dt.date(2026, 3, 31)  # the day before the holdout start
@@ -129,6 +131,7 @@ def _config(
             (universe / name).write_text(header + "\n" + "".join(f"{r}\n" for r in rows))
     (config / EVENTS_FILE).write_text("parent,ex_date,children,hand_closes,note\n")
     (config / REVIEWED_FILE).write_text("ticker,date,note\n" + "".join(f"{r}\n" for r in reviewed))
+    (config / FORM10_REVIEWED_FILE).write_text("cik,company,filed,outcome,parent,ex_date,note\n")
     return config
 
 
@@ -143,8 +146,13 @@ def _loader(config: Path, fetcher: AuditFetcher) -> DataLoader:
     )
 
 
+def _sec(config: Path, sec: FakeSec | None = None) -> Form10Index:
+    """No Form 10 filings unless `sec` holds some (tests/test_form10.py covers them)."""
+    return (sec or FakeSec()).index(config.parent / "sec", NOW)
+
+
 def _audit(config: Path, fetcher: AuditFetcher) -> corporate_actions.AuditResult:
-    return audit(config, _loader(config, fetcher), "SPY")
+    return audit(config, _loader(config, fetcher), "SPY", _sec(config))
 
 
 def _found(result: corporate_actions.AuditResult) -> list[tuple[str, dt.date, str]]:
@@ -301,7 +309,9 @@ def test_unused_reviewed_rows_are_reported_but_do_not_fail(
 ) -> None:
     config = _config(tmp_path, reviewed=(f"AAA,{DAY},earnings",))
     fetcher = AuditFetcher()
-    code = corporate_actions.main(["audit"], config, loader=_loader(config, fetcher))
+    code = corporate_actions.main(
+        ["audit"], config, loader=_loader(config, fetcher), form10=_sec(config)
+    )
     assert code == 0
     assert f"reviewed row AAA {DAY} matches no candidate" in capsys.readouterr().out
 
@@ -315,7 +325,7 @@ def test_the_cli_fails_on_open_candidates_and_writes_the_worksheet(
     fetcher.adjusted["AAA"] = (DAY, 0.9)
     sheet = tmp_path / "open.csv"
     code = corporate_actions.main(
-        ["audit", "--out", str(sheet)], config, loader=_loader(config, fetcher)
+        ["audit", "--out", str(sheet)], config, loader=_loader(config, fetcher), form10=_sec(config)
     )
     assert code == 1
     assert f"{DAY} AAA" in capsys.readouterr().err
@@ -324,7 +334,12 @@ def test_the_cli_fails_on_open_candidates_and_writes_the_worksheet(
     assert lines[1].startswith(f"AAA,{DAY},gap;step,")
     # Reviewed, it passes.
     (config / REVIEWED_FILE).write_text(f"ticker,date,note\nAAA,{DAY},earnings\n")
-    assert corporate_actions.main(["audit"], config, loader=_loader(config, fetcher)) == 0
+    assert (
+        corporate_actions.main(
+            ["audit"], config, loader=_loader(config, fetcher), form10=_sec(config)
+        )
+        == 0
+    )
 
 
 # --------------------------------------------------------------------------- holdout
@@ -348,8 +363,8 @@ def test_the_audit_has_no_holdout_route(tmp_path: Path) -> None:
     config = _config(tmp_path)
     loader = _loader(config, AuditFetcher())
     with pytest.raises(SystemExit):
-        corporate_actions.main(["audit", "--holdout"], config, loader=loader)
-    assert corporate_actions.main(["audit"], config, loader=loader) == 0
+        corporate_actions.main(["audit", "--holdout"], config, loader=loader, form10=_sec(config))
+    assert corporate_actions.main(["audit"], config, loader=loader, form10=_sec(config)) == 0
 
 
 def test_the_loader_rejects_feed_rows_outside_the_range(tmp_path: Path) -> None:

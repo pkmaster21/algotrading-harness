@@ -5,7 +5,8 @@ needs them. They are never written to `os.environ`, so nothing else in the proce
 (strategy code included) can read them from the environment, and they are never taken
 from the environment either: `.env` is the only source.
 
-Only the data loader and the broker adapter call this module.
+Only the data loader, the broker adapter and the spin-off audit (for the SEC contact,
+`read_sec_user_agent`) call this module.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from dotenv import dotenv_values
 
 PAPER_KEY_ID = "ALPACA_PAPER_API_KEY"
 PAPER_SECRET_KEY = "ALPACA_PAPER_SECRET_KEY"
+SEC_USER_AGENT = "SEC_USER_AGENT"
 
 
 class KeysError(RuntimeError):
@@ -47,3 +49,21 @@ def read_alpaca_paper_keys(dotenv_path: Path) -> AlpacaPaperKeys:
     if not key_id or not secret_key:
         raise KeysError(f"{PAPER_KEY_ID} and {PAPER_SECRET_KEY} must be set in {dotenv_path.name}")
     return AlpacaPaperKeys(key_id=key_id, secret_key=secret_key)
+
+
+def read_sec_user_agent(dotenv_path: Path) -> str:
+    """The User-Agent the SEC asks automated clients to send: a name and a contact email
+    (https://www.sec.gov/os/accessing-edgar-data). It is the owner's to set in `.env`;
+    nothing in the repo holds one.
+
+    Raises KeysError if it is missing, has no `@`, or holds a line break. The message never
+    contains the value.
+    """
+    values = dotenv_values(dotenv_path, interpolate=False)
+    agent = (values.get(SEC_USER_AGENT) or "").strip()
+    if not agent or "@" not in agent or any(ch in agent for ch in "\r\n"):
+        raise KeysError(
+            f"{SEC_USER_AGENT} must be set in {dotenv_path.name} to a name and a contact "
+            "email, as the SEC asks of automated clients"
+        )
+    return agent

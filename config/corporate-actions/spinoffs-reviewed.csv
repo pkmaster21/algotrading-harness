@@ -46,6 +46,7 @@ KDP,2018-07-10,cash dividend of 103.75 going ex (Alpaca's dividend feed under DP
 NLSN,2018-07-26,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
 IPGP,2018-07-31,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
 SMCI,2018-08-22,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
+HON,2018-10-01,"Garrett Motion spin-off, 1 per 10 shares (found by its Form 10, CIK 1735707); no GTX bar on the ex-date, so it cannot be built. f about 0.990, from GTX's opening price of $17.60 (iClub), against Alpaca's applied factor of 0.989. The leftover correction is under 0.1%. No source for GTX's raw close that day"
 ALGN,2018-10-25,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
 AMD,2018-10-25,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"
 FLEX,2018-10-26,"judged earnings or company news, not checked against a news source; raw bars fall the same, no feed row or adjustment step; not a spin-off"

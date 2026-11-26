@@ -57,3 +57,6 @@ XRX,2017-01-03,CNDT:1/5,,1 Conduent per 5 shares; Alpaca applied it as a split o
 ZBH,2022-03-01,ZIMV:1/10,,1 ZimVie per 10 shares; from Alpaca's spin-off feed (audit)
 EQT,2018-11-13,ETRN:0.8,,0.80 Equitrans Midstream per share; not in Alpaca's feeds; found by the gap (audit)
 BIIB,2017-02-02,BIVV:1/2,,1 Bioverativ per 2 shares (Biogen 10-Q; regular-way from 2017-02-02); Alpaca did not apply it; found in review (no audit source flags it)
+HON,2016-10-03,ASIX:1/4,,1 AdvanSix per 4 shares; no feed row or step over 3%; found by its Form 10 (CIK 1673985)
+IBM,2021-11-04,KD:1/5,,1 Kyndryl per 5 shares; no feed row; Alpaca did not apply it (raw close -4.9%); found by its Form 10 (CIK 1867072)
+HOT,2016-05-13,IILG:0.4309,,"Vistana spun off and merged into Interval Leisure Group on 2016-05-11 (Alpaca files ILG under IILG); about 0.4309 ILG per Starwood share, and the regular-way HOT market carried the ILG shares through 2016-05-12 (ILG's press release of 2016-05-12, filed under Starwood's SEC record, https://www.sec.gov/Archives/edgar/data/0000316206/000110465916120268/a16-11125_1ex99d1.htm); Alpaca applied nothing; found by its Form 10 (CIK 1644949)"
