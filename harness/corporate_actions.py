@@ -38,7 +38,25 @@ every universe file and the benchmark, it lists candidates from four Alpaca sour
 
 It exits non-zero until each candidate (ticker, date) is a parent's ex-date in
 spinoffs.csv (an addition: a child's, within 5 sessions), or a row in
-spinoffs-reviewed.csv with a note. SEC Form 10 filings, the fifth source, come later.
+spinoffs-reviewed.csv with a note.
+
+The fifth source is SEC Form 10-12B filings (`harness.sec`), which find spin-offs the
+other four miss when the price moves little. They are read through today, not only to
+the holdout start (decision 8): an index says which companies filed, never a price, so
+it is not holdout data. Each company's first filing since a year before the data start
+(a Form 10 comes months before the distribution) is a candidate until it is a row of
+`form10-reviewed.csv`, keyed by CIK, with one of three outcomes:
+
+- `listed`: the spin-off of `parent` going ex on `ex_date`, which must be a parent's
+  ex-date in spinoffs.csv or a row of spinoffs-reviewed.csv;
+- `none`: no event for these universes (the parent is in none of them, the filing was
+  withdrawn, the ex-date is before the data start); the note says which;
+- `pending`: not yet distributed when reviewed, or going ex on or after the holdout
+  start and not yet built with `build --holdout`. Printed on every audit as a reminder,
+  and it does not fail the audit.
+
+The SEC asks for a name and contact email in the User-Agent: the audit reads it from
+`SEC_USER_AGENT` in `.env` and refuses to run without one.
 """
 
 from __future__ import annotations
@@ -74,6 +92,7 @@ from harness.config import (
     universe_names,
 )
 from harness.data import (
+    PROJECT_ROOT,
     Actions,
     DataError,
     DataLoader,
@@ -83,11 +102,15 @@ from harness.data import (
     HoldoutViolation,
     Window,
 )
+from harness.keys import KeysError, read_sec_user_agent
 from harness.models import FrozenModel, Stock
 from harness.run import _git_commit
+from harness.sec import Filing, Form10Index, SecError, first_filings
 
 EVENTS_FILE = Path("corporate-actions") / "spinoff-events.csv"
 REVIEWED_FILE = Path("corporate-actions") / "spinoffs-reviewed.csv"
+FORM10_REVIEWED_FILE = Path("corporate-actions") / "form10-reviewed.csv"
+_FORM10_HEADER = ["cik", "company", "filed", "outcome", "parent", "ex_date", "note"]
 _EVENTS_HEADER = ["parent", "ex_date", "children", "hand_closes", "note"]
 _REVIEWED_HEADER = ["ticker", "date", "note"]
 # Calendar days fetched before the ex-date to find the session before it. The longest
@@ -139,6 +162,34 @@ class Reviewed(FrozenModel):
     ticker: str
     date: dt.date
     note: str = Field(min_length=1)
+
+
+Outcome = Literal["listed", "none", "pending"]
+
+
+class Form10Reviewed(FrozenModel):
+    """One row of form10-reviewed.csv: a company's Form 10-12B, by CIK, reviewed to the
+    spin-off it registered (`listed`), to no event for these universes (`none`), or to
+    one not yet distributed or not yet built (`pending`). `company` and `filed` are for
+    the reader; the CIK is the key."""
+
+    cik: int = Field(gt=0)
+    company: str = Field(min_length=1)
+    filed: dt.date
+    outcome: Outcome
+    parent: str | None = None
+    ex_date: dt.date | None = None
+    note: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> Form10Reviewed:
+        if self.outcome == "listed":
+            if self.parent is None or self.ex_date is None:
+                raise ValueError("a listed filing names its parent and ex_date")
+            Stock(symbol=self.parent)
+        elif self.parent is not None or self.ex_date is not None:
+            raise ValueError(f"a {self.outcome} filing leaves parent and ex_date empty")
+        return self
 
 
 class Problem(FrozenModel):
@@ -236,6 +287,33 @@ def load_reviewed(config_dir: Path = DEFAULT_CONFIG_DIR) -> dict[tuple[str, dt.d
         if (row.ticker, row.date) in out:
             raise ConfigError(f"{path} line {n}: {row.ticker} {row.date} is listed twice")
         out[(row.ticker, row.date)] = row
+    return out
+
+
+def load_form10_reviewed(config_dir: Path = DEFAULT_CONFIG_DIR) -> dict[int, Form10Reviewed]:
+    """The rows of form10-reviewed.csv by CIK."""
+    path = config_dir / FORM10_REVIEWED_FILE
+    out: dict[int, Form10Reviewed] = {}
+    for n, fields in _read_rows(path, _FORM10_HEADER):
+        try:
+            row = Form10Reviewed.model_validate(
+                {
+                    "cik": int(fields["cik"]),
+                    "company": fields["company"].strip(),
+                    "filed": dt.date.fromisoformat(fields["filed"]),
+                    "outcome": fields["outcome"],
+                    "parent": fields["parent"] or None,
+                    "ex_date": dt.date.fromisoformat(fields["ex_date"])
+                    if fields["ex_date"]
+                    else None,
+                    "note": fields["note"].strip(),
+                }
+            )
+        except ValueError as exc:
+            raise ConfigError(f"{path} line {n}: {exc}") from exc
+        if row.cik in out:
+            raise ConfigError(f"{path} line {n}: CIK {row.cik} is listed twice")
+        out[row.cik] = row
     return out
 
 
@@ -436,6 +514,7 @@ def build(
 STEP_THRESHOLD = 0.03  # |a - 1| above this, a not a split: a real change of adjustment
 GAP_THRESHOLD = 0.20  # an open this far below the close before it
 ADDITION_SESSIONS = 5  # a universe addition this close to the ticker's first bar
+FILING_LEAD = dt.timedelta(days=365)  # Form 10s filed this long before the data start
 # Child tickers in the feed that are not shares of a new company.
 _SPLIT_TOLERANCE = 5e-4  # relative: a split feed ratio this close to a simple one is a split
 _NOT_SHARES = (".WI", ".WS", ".WT", ".RT", ".U", "WI", "CVR")
@@ -461,6 +540,18 @@ class AuditResult(FrozenModel):
     reviewed: tuple[tuple[str, dt.date], ...]  # covered by a row of spinoffs-reviewed.csv
     open: tuple[tuple[str, dt.date], ...]  # neither: the audit fails
     unused: tuple[Reviewed, ...]  # reviewed rows that match no candidate and no listed event
+    filed_from: dt.date  # Form 10 filings from this day through `filed_to`
+    filed_to: dt.date
+    filings: tuple[Filing, ...]  # each company's first 10-12B in that range
+    filings_open: tuple[Filing, ...]  # no row in form10-reviewed.csv: the audit fails
+    # Listed rows whose (parent, ex_date) is neither in spinoffs.csv nor reviewed: fails.
+    filings_unmatched: tuple[Form10Reviewed, ...]
+    filings_pending: tuple[Form10Reviewed, ...]  # printed every run, does not fail
+    filings_unused: tuple[Form10Reviewed, ...]  # rows that match no filing in the range
+
+    @property
+    def failed(self) -> bool:
+        return bool(self.open or self.filings_open or self.filings_unmatched)
 
     def by_key(self) -> dict[tuple[str, dt.date], list[Candidate]]:
         out: dict[tuple[str, dt.date], list[Candidate]] = {}
@@ -674,11 +765,13 @@ def audit(
     config_dir: Path,
     loader: DataLoader,
     calendar: str,
+    form10: Form10Index,
 ) -> AuditResult:
     """List every candidate in the data range, through the day before the holdout start,
     and sort them into covered by spinoffs.csv, covered by spinoffs-reviewed.csv, and
-    open. The audit never reads the holdout: it is not a holdout route (decided by David,
-    2026-11-25; PR 4 may add one)."""
+    open. The audit never reads the holdout's bars or feed rows: it is not a holdout
+    route (decided by David, 2026-11-25; PR 4 may add one). Form 10 filings are read
+    through today (decision 8), from `form10`."""
     start = loader.dates.data_start
     end = loader.cutoff(None) - dt.timedelta(days=1)
     scope = _scope(config_dir, start, end, calendar)
@@ -715,7 +808,22 @@ def audit(
             acknowledged.append(key)
         else:
             open_.append(key)
-    unused = [r for k, r in reviewed.items() if k not in keys and k not in listed_events]
+
+    filed_from = start - FILING_LEAD
+    filed_to = form10.today()
+    filings = first_filings(form10.filings(filed_from, filed_to))
+    form10_rows = load_form10_reviewed(config_dir)
+    known = parents | set(reviewed)
+    ciks = {f.cik for f in filings}
+    filings_open = [f for f in filings if f.cik not in form10_rows]
+    matched = [r for r in form10_rows.values() if r.cik in ciks]
+    unmatched = [r for r in matched if r.outcome == "listed" and (r.parent, r.ex_date) not in known]
+    pending = [r for r in matched if r.outcome == "pending"]
+    form10_unused = [r for r in form10_rows.values() if r.cik not in ciks]
+    # A reviewed row is used when a candidate, a listed event or a listed filing names it.
+    named = {(r.parent, r.ex_date) for r in matched if r.outcome == "listed"}
+    used = keys.keys() | listed_events | named
+    unused = [r for k, r in reviewed.items() if k not in used]
     return AuditResult(
         start=start,
         end=end,
@@ -724,6 +832,13 @@ def audit(
         reviewed=tuple(sorted(acknowledged, key=lambda k: (k[1], k[0]))),
         open=tuple(sorted(open_, key=lambda k: (k[1], k[0]))),
         unused=tuple(sorted(unused, key=lambda r: (r.date, r.ticker))),
+        filed_from=filed_from,
+        filed_to=filed_to,
+        filings=filings,
+        filings_open=tuple(filings_open),
+        filings_unmatched=tuple(sorted(unmatched, key=lambda r: (r.filed, r.cik))),
+        filings_pending=tuple(sorted(pending, key=lambda r: (r.filed, r.cik))),
+        filings_unused=tuple(sorted(form10_unused, key=lambda r: (r.filed, r.cik))),
     )
 
 
@@ -746,6 +861,15 @@ def write_worksheet(path: Path, result: AuditResult) -> None:
                     "; ".join(c.detail for c in group),
                 ]
             )
+
+
+def write_form10_worksheet(path: Path, result: AuditResult) -> None:
+    """The open filings as rows of form10-reviewed.csv with the outcome left to fill."""
+    with path.open("w", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(_FORM10_HEADER)
+        for f in result.filings_open:
+            writer.writerow([f.cik, f.company, f.filed.isoformat(), "", "", "", f.form])
 
 
 # --------------------------------------------------------------------------- CLI
@@ -788,16 +912,38 @@ def _report_audit(result: AuditResult) -> int:
     )
     for r in result.unused:
         print(f"  note: reviewed row {r.ticker} {r.date} matches no candidate")
-    if not result.open:
+    reviewed_ciks = {f.cik for f in result.filings} - {f.cik for f in result.filings_open}
+    pending = {r.cik for r in result.filings_pending}
+    print(
+        f"form 10 filings {result.filed_from}..{result.filed_to}: {len(result.filings)} "
+        f"compan(ies); reviewed: {len(reviewed_ciks)} ({len(pending)} pending); "
+        f"open: {len(result.filings_open)}"
+    )
+    for r in result.filings_pending:
+        print(f"  pending: {r.company} (CIK {r.cik}, filed {r.filed}): {r.note}")
+    for r in result.filings_unused:
+        print(f"  note: form 10 row {r.company} (CIK {r.cik}) matches no filing in the range")
+    if not result.failed:
         return 0
     groups = result.by_key()
-    print(
-        f"open: list each in {EVENTS_FILE} and build, or add it to {REVIEWED_FILE} with a note",
-        file=sys.stderr,
-    )
+    if result.open:
+        print(
+            f"open: list each in {EVENTS_FILE} and build, or add it to {REVIEWED_FILE} with a note",
+            file=sys.stderr,
+        )
     for ticker, day in result.open:
         details = "; ".join(c.detail for c in groups[(ticker, day)])
         print(f"  {day} {ticker:<6} {details}", file=sys.stderr)
+    if result.filings_open:
+        print(f"open form 10 filings: add each to {FORM10_REVIEWED_FILE}", file=sys.stderr)
+    for f in result.filings_open:
+        print(f"  {f.filed} CIK {f.cik:<8} {f.company} ({f.form})", file=sys.stderr)
+    for r in result.filings_unmatched:
+        print(
+            f"  {FORM10_REVIEWED_FILE}: {r.company} (CIK {r.cik}) names {r.parent} "
+            f"{r.ex_date}, which is neither in {SPINOFFS_FILE} nor in {REVIEWED_FILE}",
+            file=sys.stderr,
+        )
     return 1
 
 
@@ -806,6 +952,8 @@ def main(
     config_dir: Path = DEFAULT_CONFIG_DIR,
     *,
     loader: DataLoader | None = None,  # tests pass one with fake fetchers
+    form10: Form10Index | None = None,  # tests pass one with a fake opener
+    dotenv_path: Path = PROJECT_ROOT / ".env",
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m harness.corporate_actions",
@@ -824,6 +972,11 @@ def main(
     audit_cmd.add_argument(
         "--out", type=Path, help="write the open candidates to this CSV, for the review"
     )
+    audit_cmd.add_argument(
+        "--form10-out",
+        type=Path,
+        help="write the open Form 10 filings to this CSV, as rows of form10-reviewed.csv",
+    )
     args = parser.parse_args(argv)
     try:
         settings = load_data_settings(config_dir)
@@ -837,16 +990,27 @@ def main(
                 git_commit=_git_commit(config_dir.resolve().parent),
             )
         if args.command == "audit":
-            found = audit(config_dir, loader, settings.benchmark)
+            form10 = form10 or Form10Index(read_sec_user_agent(dotenv_path))
+            found = audit(config_dir, loader, settings.benchmark, form10)
             if args.out is not None:
                 write_worksheet(args.out, found)
+            if args.form10_out is not None:
+                write_form10_worksheet(args.form10_out, found)
             return _report_audit(found)
         previous = {(e.parent, e.ex_date): e for e in read_spinoffs(config_dir / SPINOFFS_FILE)}
         result = build(config_dir, loader, settings.benchmark, holdout=holdout)
     except BuildError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except (ConfigError, DataError, HoldoutLogError, HoldoutViolation, OSError) as exc:
+    except (
+        ConfigError,
+        DataError,
+        HoldoutLogError,
+        HoldoutViolation,
+        KeysError,
+        SecError,
+        OSError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     _report(result, previous)
