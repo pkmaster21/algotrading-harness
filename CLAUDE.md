@@ -14,6 +14,7 @@ Strategies are pluggable modules; the harness owns everything else.
 | UI principles and contract   | `docs/ui-design.md`                        |
 | Operating paper trading      | `docs/paper-runbook.md`                    |
 | Point-in-time sp500 universe | `docs/pit-universe-design.md`              |
+| Spin-offs; rerun build/audit | `docs/spinoff-design.md`                   |
 | Results of a past backtest   | `backtests/<run>/summary.json` (see below) |
 
 Read `ARCHITECTURE.md` when planning a new slice or changing the harness,
@@ -34,9 +35,16 @@ not for routine strategy work.
   Never fill on the signal bar.
 - **Determinism.** Same data + same config + same strategy = identical results.
 - **Holdout discipline.** Data on or after the holdout start date is off-limits except
-  to a backtest explicitly run in holdout mode, or to the paper runner trading a frozen
-  profile. Both are logged, each in its own log (`HoldoutAccess` and `PaperAccess` in
-  `harness/data.py` are the only two ways past the cutoff).
+  to a backtest explicitly run in holdout mode, to the paper runner trading a frozen
+  profile, or to the spin-off build run with `--holdout` (`harness/corporate_actions.py`),
+  which measures holdout-dated events into `spinoffs.csv`. The backtest and the build both
+  go through `HoldoutAccess` and the holdout log, paper through `PaperAccess` and its own
+  log; these two in `harness/data.py` are the only ways past the cutoff. Two
+  corporate-action requests reach past the cutoff and drop every row dated in the holdout
+  before anything reads it: the build's dividend request (120 days past the event) and
+  the audit's spin-off and split feed (through today). Holdout-dated rows of
+  `spinoffs.csv` enter in-sample recipes too (their multipliers scale earlier bars);
+  research reads only the parent, ex-date, children and ratios of holdout-dated rows.
 
 ## Scope (current)
 
@@ -60,6 +68,7 @@ config/       # YAML, read only by harness/config.py
   strategies/ #   strategy presets (params, rule templates); UI-editable; gitignored except example
   risk/       #   risk presets (conservative, balanced, aggressive)
   universe/   #   symbol lists; sp500 is point-in-time (membership, renames, corrections, bad bars)
+  corporate-actions/ # spin-offs: reviewed events, built spinoffs.csv, audit reviews
   *.yaml      #   fixed settings: costs, construction, dates, data, execution (not UI-editable)
 docs/         # detail docs (ui-design.md); entry-point docs stay at the root
 tests/        # pytest; test strategies (buy-and-hold, look-ahead cheater) live here

@@ -1,10 +1,11 @@
 # Spin-off adjustment: design
 
-Status: proposed (2026-11-24). Amended after its review: Form 10 filings as an audit
-source (decision 8), recovery after the guard fires (decision 6), same-day dividends
-(decision 4), tickers (decision 2), several events on one symbol (decision 4), and the
-restart check (decision 7). Second review: the data-fix holdout rerun (decision 6) and
-Form 10 filings through today (decision 8). Fixes #55.
+Status: built (2026-11-27); proposed 2026-11-24. Amended after its review: Form 10
+filings as an audit source (decision 8), recovery after the guard fires (decision 6),
+same-day dividends (decision 4), tickers (decision 2), several events on one symbol
+(decision 4), and the restart check (decision 7). Second review: the data-fix holdout
+rerun (decision 6) and Form 10 filings through today (decision 8). Fixes #55. Built in
+#67, #68, #75 and #78; decisions 2 and 8 and the PR plan updated to match what was built.
 
 ## Why
 
@@ -48,11 +49,14 @@ Scripts in `research/spinoffs_2026_11_20/` (gitignored).
 1. **Scope: distributions of shares in another company.** Spin-offs, and share-class
    distributions that work the same way (UA's class C shares, 2016-04-08). Not mergers,
    cash acquisitions, tender offers or rights.
-2. **Events are a pinned, reviewed file.** `config/corporate-actions/spinoffs.csv`, one row
-   per (parent, ex-date), applied to every universe. Changing it is a reviewed PR, never a
-   fetch at run time: same data, same results. Columns: parent ticker, ex-date, children
-   with their ratios (`CARR:1;OTIS:0.5`), the parent's and each child's raw ex-date close,
-   the resolved factors (decision 4), the cached step (decision 6), and a source note.
+2. **Events are pinned, reviewed files.** A person lists each event in
+   `config/corporate-actions/spinoff-events.csv` (parent, ex-date, children with their
+   ratios as `CARR:1;OTIS:0.5`, any child closes given by hand, a source note), and the
+   build (decision 8) resolves it into `spinoffs.csv`, one row per (parent, ex-date),
+   applied to every universe. The list is kept apart from the built file so a rebuild
+   never overwrites a person's input. Changing either is a reviewed PR, never a fetch at
+   run time: same data, same results. `spinoffs.csv` adds the parent's and each child's
+   raw ex-date close, the resolved factors (decision 4) and the cached step (decision 6).
    The ex-date is the first session the parent trades without the shares (regular way).
    **Tickers** are the ones Alpaca files the bars under today, which are the ones the
    universe files and the cache use: RTX (UTX on the day), TGNA (GCI), APTV (DLPH), the
@@ -117,21 +121,35 @@ Scripts in `research/spinoffs_2026_11_20/` (gitignored).
    `raw_opens` (paper slippage) is untouched.
 8. **Build and audit are a CLI, not the run path.** A new `harness/corporate_actions.py`:
    - `build` fetches raw and adjusted bars for each listed event's parent and children and
-     fills in the closes, `f`, `d`, `a`, `m` and `cached_step`. Events on or after the
-     holdout start are resolved only with `--holdout`, logged in the holdout log like a
-     holdout backtest.
+     fills in the closes, `f`, `d`, `a`, `m` and `cached_step`. It writes all or nothing:
+     an event it cannot measure (no parent bar on the ex-date or the session before)
+     fails the build, naming every such event, unless it is listed with a note in
+     `spinoffs-reviewed.csv`. Events on or after the holdout start are resolved only with
+     `--holdout`, logged in the holdout log like a holdout backtest; without it their
+     current rows are kept as built. Its dividend request reaches 120 days past the
+     event, since Alpaca selects dividends by process date, and drops any row dated in
+     the holdout before anything reads it.
    - `audit` lists candidate events and fails until each one is either a row in
      `spinoffs.csv` or a row in `spinoffs-reviewed.csv` (ticker, date, note: "earnings",
      "parent not in any universe"). Candidates:
-     - every Form 10-12B first filing in the SEC's quarterly form indexes from the data
-       start to the latest quarterly index, reviewed by hand to its parent (or "parent
-       not in any universe"). From 2021 Alpaca's feed has the events and the ones checked
-       are right, but the filings cost little (103 more from 2021 to 2026-11) and catch
-       any the feed misses;
+     - each company's first Form 10-12B filing in the SEC's quarterly form indexes, from
+       a year before the data start (a Form 10 comes months before the distribution)
+       through the latest index, read through today since an index holds no prices. Each
+       is reviewed by hand in `form10-reviewed.csv`, keyed by CIK, as `listed` (the
+       parent and ex-date of an event in `spinoffs.csv` or `spinoffs-reviewed.csv`),
+       `none` (no event for these universes; the note says why) or `pending` (not yet
+       distributed, or going ex in the holdout and not built with `--holdout`; printed on
+       every audit, never failing it). From 2021 Alpaca's feed has the events and the
+       ones checked are right, but the filings cost little and catch any the feed misses;
      - every row of Alpaca's spin-off feed for a symbol in any universe file, after
-       dropping warrants, rights, CVRs and `.WI` tickers;
-     - every step in Alpaca's adjusted-to-raw ratio over 3% that is not a split in
-       Alpaca's split feed;
+       dropping warrants, rights, CVRs and `.WI` tickers. The feed is requested from a
+       year before the data start through today (process dates can lag the ex-date by
+       years) and rows going ex on or after the holdout start are dropped before anything
+       reads them. The audit is not a holdout route;
+     - every step in Alpaca's adjusted-to-raw ratio over 3% that is not explained by a
+       simple forward split in Alpaca's split feed (n for 1, or p for q with both at most
+       10). Before 2021 that feed also files spin-offs as splits, so those stay
+       candidates;
      - every open gap of 20% or more;
      - every sp500 addition whose first bar is within 5 sessions of its start date
        (spin-offs often join the index on day one, as CARR and OTIS did).
@@ -167,15 +185,46 @@ Scripts in `research/spinoffs_2026_11_20/` (gitignored).
    with the guard, wiring in `run.py`, `paper.py` and `profiles.py`. Tests on synthetic
    bars for all three cases, a same-day dividend, two events on one symbol, the guard,
    skipped events, and an old profile's hash. The file ships with the header only.
-3. `feat(data): spin-off build and audit`. `harness/corporate_actions.py`, the filled
-   `spinoffs.csv`, `spinoffs-reviewed.csv`, and a test that RTX's cached series is
-   continuous across 2020-04-03 after adjustment (skipped without the cache).
+3. `feat(data): spin-off build` (#68). `harness/corporate_actions.py build`,
+   `spinoff-events.csv` and the first `spinoffs.csv`, with coverage limited to the listed
+   events until the audit merged.
+   3a. `feat(data): spin-off audit from Alpaca's data` (#75). The feed, step, gap and
+   addition sources, the filled `spinoffs.csv` and `spinoffs-reviewed.csv`.
+   3b. `feat(data): spin-off audit from SEC Form 10 filings` (#78). `harness/sec.py`
+   and `form10-reviewed.csv`.
 4. `docs: spin-off adjustment`. ARCHITECTURE.md decision log, components and open
-   questions (volume, below), CLAUDE.md layout, and how to rerun build and audit when
-   Alpaca or the universes change.
+   questions (volume, below), the CLAUDE.md holdout rule and layout, this plan, and how
+   to rerun build and audit (below).
 5. Paper refusal on a new spin-off (open question 2).
 6. The data-fix holdout rerun (decision 6), when a guard first fires or PR 5 first
    refuses.
+
+## Rerunning build and audit
+
+Neither is part of a run, and a run reads only `spinoffs.csv`. Rerun:
+
+- the **audit** after a change to any universe file or the data range, periodically
+  for new Form 10 filings and feed rows (suggested: quarterly; `harness/sec.py` treats a
+  quarter's index as final once it is fetched a week or more after the quarter ends), and
+  before relying on a pending Form 10 row;
+- the **build** after any change to `spinoff-events.csv`, and when a load fails the guard
+  (decision 6: Alpaca changed its adjustment). A row the build prints as `CHANGED` needs
+  a look before it is committed: Alpaca has served transient values (FTV, NEE, 2026-11-26)
+  that were gone on the next fetch.
+
+```
+uv run python -m harness.corporate_actions audit --out <scratch>/open.csv --form10-out <scratch>/form10.csv
+uv run python -m harness.corporate_actions build
+```
+
+The audit exits 0 when every candidate is listed or reviewed. Otherwise each open
+(ticker, date) goes either into `spinoff-events.csv` (then build) or into
+`spinoffs-reviewed.csv` with a note that says what was checked ("not checked against a
+news source" when only the bars were read); each open Form 10 filing goes into
+`form10-reviewed.csv`. `--out` and `--form10-out` write the open rows in those files'
+formats. The audit needs `SEC_USER_AGENT` in `.env` (a name and contact email, set
+locally, never committed). `build --holdout` is for an event dated in the holdout and is
+logged in the holdout log. The updated files are a reviewed PR like any config change.
 
 ## Open questions
 

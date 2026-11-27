@@ -34,8 +34,11 @@ reconciliation, and a clock-driven runner around the broker.
 | File | Responsibility | Slice |
 |---|---|---|
 | `harness/models.py` | Shared data shapes: Bar, Stock, OptionContract, Leg, Signal, Fill, Position | 1 |
-| `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models. For a point-in-time universe, load the membership, corrections, renames and bad-bars files into a validated `Membership` | 1 |
-| `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff. Two ways past it, each with its own log: `HoldoutAccess` (a holdout backtest) and `PaperAccess` (paper trading a frozen profile). `raw_opens` gives paper trading the unadjusted opens its fills are measured against | 1 |
+| `harness/config.py` | Build a run's recipe: resolve the chosen presets and fixed settings into validated pydantic models. For a point-in-time universe, load the membership, corrections, renames and bad-bars files into a validated `Membership`. Carry the resolved spin-offs of the recipe's own symbols as `Recipe.spinoffs` | 1 |
+| `harness/data.py` | Fetch and cache bars; enforce the holdout cutoff. Two ways past it, each with its own log: `HoldoutAccess` (a holdout backtest, or the spin-off `build --holdout`) and `PaperAccess` (paper trading a frozen profile). `raw_opens` gives paper trading the unadjusted opens its fills are measured against. Read-only dividend and corporate-action fetchers for the spin-off build and audit, which drop every row dated in the holdout | 1 |
+| `harness/adjust.py` | Pure spin-off adjustment of a loaded panel (one multiplier per event on prices before the ex-date, volume untouched) and the guard that fails a load when Alpaca's own adjustment of an event has changed. Called straight after `DataLoader.load` by `run.py`, `paper.py` and `profiles.py` | Data |
+| `harness/corporate_actions.py` | Spin-off CLI, never part of a run: `build` resolves the reviewed events into `spinoffs.csv` (all or nothing; holdout-dated events only with `--holdout`, logged); `audit` lists candidate events from five sources and fails until each is listed or reviewed | Data |
+| `harness/sec.py` | SEC Form 10-12B quarterly indexes for the audit, cached under `data/sec/`; needs `SEC_USER_AGENT` in `.env`. No prices, never read by a run | Data |
 | `harness/ratelimit.py` | Request rate limiter shared by the data loader and the venue adapter | 2 |
 | `harness/orders.py` | Order manager core: staging, deterministic order ids, duplicate-free submission (write-ahead journal, lookup before resend), venue states into ledger fills, cancel with confirmation, recovery after a restart. Implements `Broker` for paper trading: `on_session_open` runs the open (auction exits, entries released against the actual account after the open, deadlines), with optional manual approval of entries | 2 |
 | `harness/inbox.py` | How another process hands the runner a control command: one file per command, written whole, removed once handled. Approve and reject so far | 2 |
@@ -333,9 +336,45 @@ Design and rejected alternatives: `docs/pit-universe-design.md`.
   without the member mask or bad-bars windows. Paper support is its own design, which must
   add a freshness check on the membership file.
 
+### Spin-off adjustment (2026-11-24)
+
+Design, findings and rejected alternatives: `docs/spinoff-design.md` (#55).
+
+- **Alpaca's adjusted bars get most pre-2021 spin-offs wrong** (not applied, or applied as
+  a reverse split), faking moves of -40% to -85%. The harness corrects them with one
+  multiplier per event, measured against Alpaca's own adjustment, applied in the shared
+  load path so backtest, paper and the restart check see the same bars.
+- **Events are reviewed files, never a fetch at run time:** `spinoff-events.csv` (the
+  reviewed list, kept apart from the built file), `spinoffs.csv` (built from it),
+  `spinoffs-reviewed.csv` and `form10-reviewed.csv` (audit candidates that are not events).
+  The recipe carries resolved values, so a frozen profile hashes as before.
+- **A guard fails closed** when Alpaca later changes its adjustment of an event, so a
+  fixed vendor adjustment is never applied twice. Recovery is a rebuilt row and a new
+  profile; one identical data-fix rerun of a seen holdout is allowed per data fix.
+- **Holdout-dated events enter in-sample recipes** (decided by David, 2026-11-24): an
+  event's multiplier scales the bars before its ex-date, so an in-sample run of a symbol
+  with a spin-off in the holdout uses a factor measured on holdout closes. Accepted
+  because the alternative is a fake drop at the boundary; such rows are built only by
+  `build --holdout` (holdout log), and research reads only their parent, ex-date,
+  children and ratios (every other column can be turned back into holdout closes).
+- **Corporate-action requests may reach into the holdout and drop the rows there**
+  (David, 2026-11-25): Alpaca selects these by process date, which can lag the ex-date
+  by weeks (dividends, 120 days) or years (spin-offs, through today). Capping at the
+  cutoff would silently miss events. SEC indexes are read through today: they hold no
+  prices.
+
 ## Open questions
 
 - Is the flat 0.05% cost assumption realistic once paper fills come in?
+- Volume across a spin-off. Alpaca's reverse-split treatment of RTX, TGNA and APTV seems
+  to divide their volume before the ex-date by its factor too (cached monthly volume
+  jumps 2.5x for RTX and 5.6x for TGNA in the ex-date's month; not checked against raw
+  volume). The spin-off adjustment leaves volume alone. Settle it before the first
+  strategy that reads volume (`docs/spinoff-design.md`, open question 1).
+- The spin-off audit's `_is_split` excuses an adjustment step when Alpaca's split feed
+  holds a ratio of p for q with both at most 10, so a spin-off factor Alpaca filed as a
+  split of 1.2, 1.25 or 1.111 (10 for 9) would pass unreviewed (1.1 would not).
+  Tighten it if one turns up.
 - Keeping historical index membership current for paper trading (backtests are resolved:
   `docs/pit-universe-design.md`): update cadence and how stale the list may be.
 - Actual hard-limit values for each slice 2 risk preset (position size, exposure, daily
